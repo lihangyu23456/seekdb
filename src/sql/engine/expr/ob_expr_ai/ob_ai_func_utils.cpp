@@ -231,19 +231,42 @@ int ObOpenAIUtils::ObOpenAIEmbed::parse_output(common::ObIAllocator &allocator,
       ret = OB_INVALID_DATA;
     } else {
       ObJsonArray *data_array = static_cast<ObJsonArray *>(data_node);
-      ObJsonNode *embedding_node = nullptr;
-      for (int64_t i = 0; OB_SUCC(ret) && i < data_array->element_count(); i++) {
-        if (OB_ISNULL(embedding_node = data_array->get_value(i))) {
-          ret = OB_INVALID_DATA;
-        } else if (embedding_node->json_type() != ObJsonNodeType::J_OBJECT) {
+      const int64_t count = data_array->element_count();
+      ObJsonNode **embeddings = nullptr;
+      if (count > 0 && OB_ISNULL(embeddings = static_cast<ObJsonNode **>(allocator.alloc(sizeof(ObJsonNode *) * count)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else if (count > 0) {
+        MEMSET(embeddings, 0, sizeof(ObJsonNode *) * count);
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < count; i++) {
+        ObJsonNode *embedding_node = data_array->get_value(i);
+        if (OB_ISNULL(embedding_node) || embedding_node->json_type() != ObJsonNodeType::J_OBJECT) {
           ret = OB_INVALID_DATA;
         } else {
           ObJsonObject *embedding_obj = static_cast<ObJsonObject *>(embedding_node);
           ObJsonNode *embedding = embedding_obj->get_value("embedding");
+          // The provider may answer out of order, so every embedding is placed
+          // at the index of the input it belongs to.
+          int64_t index = i;
+          ObJsonNode *index_node = embedding_obj->get_value("index");
+          if (OB_NOT_NULL(index_node) && index_node->json_type() == ObJsonNodeType::J_INT) {
+            index = static_cast<ObJsonInt *>(index_node)->get_int();
+          }
           if (OB_ISNULL(embedding)) {
             ret = OB_INVALID_DATA;
-          } else if (OB_FAIL(result_array->append(embedding))) {
+          } else if (index < 0 || index >= count) {
+            ret = OB_INVALID_DATA;
+          } else if (OB_NOT_NULL(embeddings[index])) {
+            ret = OB_INVALID_DATA;
+          } else {
+            embeddings[index] = embedding;
           }
+        }
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < count; i++) {
+        if (OB_ISNULL(embeddings[i])) {
+          ret = OB_INVALID_DATA;
+        } else if (OB_FAIL(result_array->append(embeddings[i]))) {
         }
       }
       if (OB_SUCC(ret)) {
