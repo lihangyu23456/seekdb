@@ -117,8 +117,16 @@ The runner validates:
 - filter, delete, and freshness fallback;
 - threshold-triggered CAGRA rebuild;
 - one-call `batch_knn`, row cardinality, and recall for Top-10 and Top-100;
+- reuse of the cached CAGRA index by a repeated `batch_knn` call;
 - GPU device file descriptors and hidden-GPU fallback;
 - bounded observer cleanup and closed ports.
+
+The reuse rule of that cache is checked without a GPU, because it is the part
+that decides whether an answer may be served from a previous graph:
+
+```bash
+bash docs/gpu-vector-index-hipvs-cuvs/validation/run_batch_cache_test.sh
+```
 
 The runner writes a machine-readable `summary.json` into its evidence directory.
 Results for a specific candidate belong in that pull request's description or a
@@ -126,12 +134,40 @@ validation comment rather than in the source tree.
 The no-GPU DDL contract remains covered by
 [`vector_index_cuvs_ddl.test`](../../tools/deploy/mysql_test/test_suite/vector_index/t/vector_index_cuvs_ddl.test).
 
+## Batch path: reuse the CAGRA index across calls
+
+`dbms_vector.batch_knn` reads the base table and the probe table on every call
+and used to build a fresh CAGRA graph each time. The graph build (NN-Descent on
+the GPU) costs orders of magnitude more than the search that follows it, so a
+repeated call over the same base table paid the build price again for the same
+answer.
+
+The batch path now keeps the built index and reuses it while the base data is
+unchanged:
+
+- the cache key is a fingerprint over **every** float of the base buffer, so a
+  changed row produces a different key and therefore a rebuild. An index built
+  from different data can never be served;
+- the build runs under the cache lock, so two concurrent calls over the same
+  data build the graph only once;
+- a search on a cached index is serialized, because a CAGRA graph must not be
+  searched by two threads at once;
+- the cache keeps one index by default. `SEEKDB_CUVS_BATCH_CACHE_ENTRIES`
+  raises the limit when several base tables are queried in turn, and `0`
+  switches the cache off and restores the previous one-shot behaviour.
+
+The reuse rule lives in
+[`ob_cuvs_batch_cache.h`](../../src/oblib/lib/vector/ob_cuvs_batch_cache.h),
+which has no database dependency and is therefore covered by
+[`test_batch_cache.cpp`](validation/test_batch_cache.cpp).
+
 ## Current limitations
 
 - Phase 1 supports dense float32 L2 indexes only.
 - GPU indexes are process-local and rebuilt lazily; persistence and cache reuse
   are follow-up work.
-- The explicit batch API rebuilds its CAGRA index per call.
+- The batch path reuses its CAGRA index while the base data is unchanged; a
+  changed base table still needs a fresh graph.
 - GPU validation is manual because upstream CI has no compatible GPU runner.
 - Multi-GPU, long-duration, and snapshot-reload coverage are out of scope for
   this phase.

@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX LIB
 
 #include "ob_vsag_adaptor.h"
+#include "ob_cuvs_batch_cache.h"
 #include <map>
 #include <set>
 #include <mutex>
@@ -244,15 +245,77 @@ static void *ob_cuvs_batch_job(void *arg) {
   return nullptr;
 }
 
-// [BATCH one-shot] Build a CAGRA over raw base + batch-search nq queries + free,
-// all on a 32MB-stack pthread (cuVS overflows the small PL/worker stack). Used by
-// dbms_vector.batch_knn, which reads vectors from SQL (no add_index registry).
+// ==== [hipVS/cuVS] CAGRA index cache for the raw batch path ====
+// dbms_vector.batch_knn re-reads the base table on every call, and the batch
+// path used to build a brand new CAGRA graph each time. The graph build
+// (NN-Descent on the GPU) costs orders of magnitude more than the search
+// itself, so the index is kept and reused while the base data stays the same.
+// The reuse rule itself lives in CuvsBatchIndexCache, which is testable
+// without a GPU.
+
+// How many CAGRA indexes stay alive for the batch path. One is enough for the
+// repeated calls over the same base table; more can be configured when several
+// base tables are queried in turn. Zero switches the cache off.
+static size_t ob_cuvs_batch_cache_limit() {
+  const char *value = ::getenv("SEEKDB_CUVS_BATCH_CACHE_ENTRIES");
+  if (value == nullptr || value[0] == '\0') { return 1; }
+  char *end = nullptr;
+  const long parsed = ::strtol(value, &end, 10);
+  if (end == value || parsed < 0) { return 1; }
+  return (size_t)parsed;
+}
+
+static CuvsBatchIndexCache &ob_cuvs_batch_cache() {
+  static CuvsBatchIndexCache cache(ob_cuvs_batch_cache_limit());
+  return cache;
+}
+
+// Builds the GPU CAGRA index for the batch path. It runs under the cache lock,
+// so two concurrent calls over the same data build the graph only once.
+static std::shared_ptr<CuvsBatchIndexCache::Entry> ob_cuvs_build_batch_index(
+    const float *base, long n, long dim, uint64_t fingerprint) {
+  int ret = OB_SUCCESS;
+  const int64_t start_us = ObTimeUtility::current_time();
+  void *handle = seekdb_cuvs_build(base, n, dim);
+  const int64_t build_us = ObTimeUtility::current_time() - start_us;
+  if (handle == nullptr) {
+    ret = OB_ERR_VSAG_RETURN_ERROR;
+    LOG_WARN("[OBVSAG][cuVS] GPU CAGRA build failed for the batch path",
+             KR(ret), K(n), K(dim));
+    return nullptr;
+  }
+  auto entry = std::make_shared<CuvsBatchIndexCache::Entry>();
+  entry->index_ = ob_cuvs_wrap(handle);
+  LOG_INFO("[OBVSAG][cuVS] built GPU CAGRA index for the batch path",
+           KR(ret), K(n), K(dim), K(build_us), K(fingerprint));
+  return entry;
+}
+
+// [BATCH] Reuse (or build) a CAGRA over the raw base, then batch-search nq
+// queries in ONE GPU call. All on a 32MB-stack pthread (cuVS overflows the
+// small PL/worker stack). Used by dbms_vector.batch_knn, which reads vectors
+// from SQL (no add_index registry).
 struct ObCuvsRawBatchJob {
   const float *base; long n; long dim; const float *query; long nq; long topk;
   unsigned *off; float *dst; long served_;
 };
 static void *ob_cuvs_raw_batch_job(void *arg) {
   ObCuvsRawBatchJob *j = static_cast<ObCuvsRawBatchJob *>(arg);
+  if (ob_cuvs_batch_cache().limit() > 0) {
+    bool reused = false;
+    std::shared_ptr<CuvsBatchIndexCache::Entry> entry =
+        ob_cuvs_batch_cache().get(j->base, j->n, j->dim, ob_cuvs_build_batch_index, &reused);
+    if (entry == nullptr) { return nullptr; }
+    ob_vsag_trace(reused ? "cuvs_batch_cache_hit" : "cuvs_batch_cache_build",
+                  j->base, j->n, j->dim);
+    std::lock_guard<std::mutex> search_guard(entry->mu_);
+    if (seekdb_cuvs_search(entry->index_.get(), j->query, j->nq, j->topk,
+                           j->off, j->dst) == 0) {
+      j->served_ = j->nq;
+    }
+    return nullptr;
+  }
+  // The cache is switched off: build a one-shot index and free it again.
   void *h = seekdb_cuvs_build(j->base, j->n, j->dim);
   if (h != nullptr) {
     if (seekdb_cuvs_search(h, j->query, j->nq, j->topk, j->off, j->dst) == 0) {

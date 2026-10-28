@@ -425,6 +425,17 @@ raise SystemExit(0 if float(sys.argv[1]) >= 0.75 else 1)
 PY
 record_case batch_knn_top100 PASS "trace=1 rows=10000 recall=$batch_recall_top100"
 
+# The Top-100 call above already ran on the cached graph, so its recall is the
+# recall of the cached path. This case checks the reuse itself: the same base
+# table must be answered from the cache instead of being built again.
+offset=$(trace_offset "$TRACE")
+mysql_cmd "$PORT" -e 'use hipvs_gate; truncate table batch_out; call dbms_vector.batch_knn("batch_base","batch_probes",10,"batch_out");' >"$EVIDENCE/batch-call-cache.log" 2>&1
+cache_hits=$(trace_count "$TRACE" "$offset" cuvs_batch_cache_hit)
+cache_builds=$(trace_count "$TRACE" "$offset" cuvs_batch_cache_build)
+cache_rows=$(mysql_cmd "$PORT" -e 'use hipvs_gate; select count(*) from batch_out;')
+[[ "$cache_hits" -ge 1 && "$cache_builds" -eq 0 && "$cache_rows" -eq 1000 ]] || fail_case batch_cache_reuse "hits=$cache_hits builds=$cache_builds rows=$cache_rows"
+record_case batch_cache_reuse PASS "hits=$cache_hits builds=$cache_builds rows=$cache_rows"
+
 ls -l "/proc/$MAIN_PID/fd" > "$EVIDENCE/gpu-fds.txt"
 if grep -Fq "$RENDER" "$EVIDENCE/gpu-fds.txt" && grep -Fq '/dev/kfd' "$EVIDENCE/gpu-fds.txt"; then
   record_case gpu_fd PASS "observer opened $RENDER and /dev/kfd"
