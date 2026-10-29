@@ -52,6 +52,18 @@ public:
                                  const uint8_t char_len,
                                  CharType &type);
 
+  /**
+   * Classifies the first character of the buffer and returns its length.
+   *
+   * The charset is looked up once and the character is decoded once, so the
+   * hot path of the tokenizer does not repeat the work for every character.
+   */
+  static int classify_first_valid_char(ObCollationType coll_type,
+                                       const char *input,
+                                       const int64_t buf_size,
+                                       int64_t &char_len,
+                                       CharType &type);
+
   static int check_cn_number(ObCollationType coll_type,
                              const char *input,
                              const uint8_t char_len,
@@ -76,6 +88,54 @@ public:
 private:
   template <ObCharsetType CS_TYPE>
   static int do_classify(const char *input, const uint8_t char_len, CharType &type);
+
+  // Decides the type of a character from its code point. The checks all look at
+  // the code point, so the character is decoded once and the code point decides
+  // the type.
+  template <ObCharsetType CS_TYPE>
+  static int do_classify_unicode(ob_wc_t unicode, CharType &type);
+
+  // Reads the first valid character of the buffer and classifies it. The
+  // character is decoded once and the code point decides the type.
+  template <ObCharsetType CS_TYPE>
+  static int do_classify_code_point(const char *input,
+                                     const uint8_t char_len,
+                                     CharType &type);
+
+  /*************************  Classify by the code point *********************/
+  // The checks of the character type all look at the decoded code point, so the
+  // character is decoded once and the code point decides the type. Decoding a
+  // character once instead of once per check takes the repeated decoding out
+  // of the hot path of the tokenizer.
+  template <ObCharsetType CS_TYPE>
+  static typename std::enable_if<(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+  is_high_surrogate(ob_wc_t unicode)
+  {
+    return ObUnicodeBlockUtils::check_high_surrogate(unicode);
+  }
+
+  template <ObCharsetType CS_TYPE>
+  static typename std::enable_if<!(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+  is_high_surrogate(ob_wc_t unicode)
+  {
+    UNUSED(unicode);
+    return false;
+  }
+
+  template <ObCharsetType CS_TYPE>
+  static typename std::enable_if<(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+  is_low_surrogate(ob_wc_t unicode)
+  {
+    return ObUnicodeBlockUtils::check_low_surrogate(unicode);
+  }
+
+  template <ObCharsetType CS_TYPE>
+  static typename std::enable_if<!(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+  is_low_surrogate(ob_wc_t unicode)
+  {
+    UNUSED(unicode);
+    return false;
+  }
 
 private:
   /*************************  Alpha: english letter abc *********************/
@@ -445,26 +505,32 @@ template <ObCharsetType CS_TYPE>
 inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, CharType &type)
 {
   int ret = OB_SUCCESS;
-  bool checker = false;
+  ob_wc_t unicode = 0;
   type = CharType::USELESS;
 
-  if (OB_FAIL(is_alpha<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  if (OB_FAIL(decode_unicode<CS_TYPE>(input, char_len, unicode))) {
+  } else if (OB_FAIL(do_classify_unicode<CS_TYPE>(unicode, type))) {
+  }
+  return ret;
+}
+
+template <ObCharsetType CS_TYPE>
+inline int ObFTCharUtil::do_classify_unicode(ob_wc_t unicode, CharType &type)
+{
+  int ret = OB_SUCCESS;
+  type = CharType::USELESS;
+
+  if (ObUnicodeBlockUtils::is_alpha(unicode)) {
     type = CharType::ENGLISH_LETTER;
-  } else if (OB_FAIL(is_arabic<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  } else if (ObUnicodeBlockUtils::is_arabic(unicode)) {
     type = CharType::ARABIC_LETTER;
-  } else if (OB_FAIL(is_chinese<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  } else if (ObUnicodeBlockUtils::is_chinese(unicode)) {
     type = CharType::CHINESE;
-  } else if (OB_FAIL(is_other_cjk<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  } else if (ObUnicodeBlockUtils::is_other_cjk(unicode)) {
     type = CharType::OTHER_CJK;
-  } else if (OB_FAIL(is_surrogate_high<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  } else if (is_high_surrogate<CS_TYPE>(unicode)) {
     type = CharType::SURROGATE_HIGH;
-  } else if (OB_FAIL(is_surrogate_low<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  } else if (is_low_surrogate<CS_TYPE>(unicode)) {
     type = CharType::SURROGATE_LOW;
   }
   return ret;
@@ -495,6 +561,56 @@ inline int ObFTCharUtil::classify_first_char(ObCollationType coll_type,
     ret = OB_NOT_SUPPORTED;
     STORAGE_FTS_LOG(WARN, "Not supported charset type", K(ret), K(cs_type));
     break;
+  }
+  return ret;
+}
+
+template <ObCharsetType CS_TYPE>
+inline int ObFTCharUtil::do_classify_code_point(const char *input,
+                                                const uint8_t char_len,
+                                                CharType &type)
+{
+  int ret = OB_SUCCESS;
+  ob_wc_t unicode = 0;
+  type = CharType::USELESS;
+  if (OB_FAIL(decode_unicode<CS_TYPE>(input, char_len, unicode))) {
+  } else if (OB_FAIL(do_classify_unicode<CS_TYPE>(unicode, type))) {
+  }
+  return ret;
+}
+
+inline int ObFTCharUtil::classify_first_valid_char(ObCollationType coll_type,
+                                                  const char *input,
+                                                  const int64_t buf_size,
+                                                  int64_t &char_len,
+                                                  CharType &type)
+{
+  int ret = OB_SUCCESS;
+  type = CharType::USELESS;
+  char_len = 0;
+  if (OB_FAIL(ObCharset::first_valid_char(coll_type, input, buf_size, char_len))) {
+  } else if (char_len > 0) {
+    // The length of the character is read once and the character is decoded
+    // once, so the type of the character costs a single pass over its bytes.
+    const ObCharsetType cs_type = ObCharset::charset_type_by_coll(coll_type);
+    switch (cs_type) {
+    case CHARSET_UTF8MB4: {
+      ret = do_classify_code_point<CHARSET_UTF8MB4>(input, char_len, type);
+      break;
+    }
+    case CHARSET_UTF16: {
+      ret = do_classify_code_point<CHARSET_UTF16>(input, char_len, type);
+      break;
+    }
+    case CHARSET_UTF16LE: {
+      ret = do_classify_code_point<CHARSET_UTF16LE>(input, char_len, type);
+      break;
+    }
+    default:
+      ret = OB_NOT_SUPPORTED;
+      STORAGE_FTS_LOG(WARN, "Not supported charset type", K(ret), K(cs_type));
+      break;
+    }
   }
   return ret;
 }
