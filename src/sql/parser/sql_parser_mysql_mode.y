@@ -290,6 +290,7 @@ END_P SET_VAR DELIMITER
         FIELD_OPTIONALLY_ENCLOSED_BY FIELD_DELIMITER FIELD_ENCLOSED_BY FILE_EXTENSION
 
         GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GRANTS GROUP_CONCAT GROUPING
+        GLOB
         GLOBAL_ALIAS
 
         HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
@@ -337,6 +338,7 @@ END_P SET_VAR DELIMITER
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
+        READ_CSV READ_JSON READ_PARQUET
 
         SAMPLE SAVEPOINT SCALARS SCHEMA_NAME SCN SCOPE SCORE SECOND SECURITY SEED
         SEMISTRUCT_ENCODING_TYPE SERIAL SERIALIZABLE SESSION SESSION_USER SET_TP SHARE SHARED SHUTDOWN SIGNED
@@ -498,6 +500,7 @@ END_P SET_VAR DELIMITER
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
 %type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
+%type <node> file_table_expr file_table_func_name file_table_arg_list
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
 %type <node> table_values_clause table_values_clause_with_order_by_and_limit values_row_list row_value
@@ -10835,6 +10838,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 | '(' table_references ')'
 {
   $$ = $2;
@@ -17479,6 +17486,59 @@ literal
 }
 ;
 
+/*
+ * The file table functions read a local file as if it were a table. The name
+ * of the function is the first child, the arguments the second and the alias
+ * the third.
+ *
+ * The arguments are expressions, so a named parameter is an equality whose
+ * left side is a column reference.
+ */
+file_table_expr:
+file_table_func_name '(' file_table_arg_list ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, NULL);
+}
+| file_table_func_name '(' file_table_arg_list ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, $5);
+}
+| file_table_func_name '(' file_table_arg_list ')' AS relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, $6);
+}
+;
+
+file_table_arg_list:
+expr
+{
+  malloc_list_node($$, result->malloc_pool_, T_EXPR_LIST, 2, 1, $1);
+}
+| file_table_arg_list ',' expr
+{
+  push_back_list(result->malloc_pool_, result, $$, $1, $3);
+}
+;
+
+file_table_func_name:
+READ_CSV
+{
+  make_name_node($$, result->malloc_pool_, "read_csv");
+}
+| READ_JSON
+{
+  make_name_node($$, result->malloc_pool_, "read_json");
+}
+| READ_PARQUET
+{
+  make_name_node($$, result->malloc_pool_, "read_parquet");
+}
+| GLOB
+{
+  make_name_node($$, result->malloc_pool_, "glob");
+}
+;
+
 unreserved_keyword:
 unreserved_keyword_for_role_name { $$=$1;}
 | unreserved_keyword_ambiguous_roles { $$=$1;}
@@ -17937,6 +17997,10 @@ ACCOUNT
 |       QUICK
 |       RANK
 |       READ_ONLY
+|       READ_CSV
+|       READ_JSON
+|       READ_PARQUET
+|       GLOB
 |       RECOVER
 |       RECOVERY
 |       RECURSIVE

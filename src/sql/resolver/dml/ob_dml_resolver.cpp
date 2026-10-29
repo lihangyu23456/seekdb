@@ -2705,6 +2705,10 @@ int ObDMLResolver::resolve_table(const ParseNode &parse_tree,
         OZ (resolve_json_table_item(*table_node, table_item));
         break;
       }
+      case T_FILE_TABLE_EXPRESSION: {
+        OZ (resolve_file_table_item(*table_node, table_item));
+        break;
+      }
       case T_UNNEST_EXPRESSION: {
         if (OB_ISNULL(session_info_)) {
           ret = OB_INVALID_ARGUMENT;
@@ -3919,6 +3923,181 @@ int ObDMLResolver::resolve_json_table_item(const ParseNode &parse_tree, TableIte
   } else if (OB_FAIL(json_table_infos_.push_back(root_col_def))) {
   } else if (OB_FAIL(resolve_json_table_column_item(*chil_col_node, item,
                                                     root_col_def, -1, id, cur_column_id))) {
+  }
+  return ret;
+}
+
+int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
+                                           TableItem *&tbl_item)
+{
+  int ret = OB_SUCCESS;
+  // The file table functions read a local file as if it were a table. They are
+  // turned off by default and the file has to be inside the directory of
+  // secure_file_priv.
+  bool enable_file_sql = false;
+  ObString path;
+  ObString secure_file_priv;
+  ObString format;
+  ObString func_name;
+  ParseNode *func_node = NULL;
+  ParseNode *args_node = NULL;
+  int64_t positional_index = 0;
+
+  if (OB_ISNULL(session_info_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(session_info_->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL,
+                                                     enable_file_sql))) {
+  } else if (!enable_file_sql) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED,
+                   "the file table functions are turned off, set enable_file_sql to ON first");
+  } else if (parse_tree.num_child_ < 2 ||
+             OB_ISNULL(func_node = parse_tree.children_[0]) ||
+             OB_ISNULL(args_node = parse_tree.children_[1]) ||
+             OB_ISNULL(func_node->str_value_)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    func_name.assign_ptr(func_node->str_value_, func_node->str_len_);
+    for (int64_t i = 0; OB_SUCC(ret) && i < args_node->num_child_; ++i) {
+      const ParseNode *arg = args_node->children_[i];
+      ObString arg_name;
+      ParseNode *value_node = NULL;
+      bool is_named = false;
+      if (OB_ISNULL(arg)) {
+        ret = OB_INVALID_ARGUMENT;
+        break;
+      }
+      if (T_OP_EQ == arg->type_ && 2 == arg->num_child_ &&
+          OB_NOT_NULL(arg->children_[0]) && OB_NOT_NULL(arg->children_[1]) &&
+          T_COLUMN_REF == arg->children_[0]->type_ && 3 == arg->children_[0]->num_child_ &&
+          OB_ISNULL(arg->children_[0]->children_[1]) &&
+          OB_NOT_NULL(arg->children_[0]->children_[2])) {
+        // a named parameter, the name of the column is the name of the parameter
+        arg_name.assign_ptr(arg->children_[0]->children_[2]->str_value_,
+                            arg->children_[0]->children_[2]->str_len_);
+        value_node = arg->children_[1];
+        is_named = true;
+      } else {
+        value_node = const_cast<ParseNode *>(arg);
+      }
+      if (OB_SUCC(ret) && 0 == positional_index && !is_named) {
+        // the first argument is the path of the file
+        if (OB_FAIL(resolve_str_literal(*value_node, path))) {
+        }
+      } else if (OB_SUCC(ret) && is_named && 0 == arg_name.case_compare("sample_size")) {
+        int64_t sample_size = 0;
+        if (OB_FAIL(resolve_int_const(*value_node, sample_size))) {
+        } else if (sample_size != -1) {
+          // the schema of a file is read from the whole file
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "only sample_size = -1 is supported");
+        }
+      } else if (OB_SUCC(ret) && is_named && 0 == arg_name.case_compare("format")) {
+        if (OB_FAIL(resolve_str_literal(*value_node, format))) {
+        } else if (OB_FAIL(check_file_table_format(func_name, format))) {
+        }
+      } else if (OB_SUCC(ret) && !is_named && 1 == positional_index) {
+        // the second argument of read_csv is the format of the file
+        if (OB_FAIL(resolve_str_literal(*value_node, format))) {
+        } else if (OB_FAIL(check_file_table_format(func_name, format))) {
+        }
+      } else if (OB_SUCC(ret)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "unknown argument of the file table function");
+      }
+      if (!is_named) {
+        ++positional_index;
+      }
+    }
+    if (OB_SUCC(ret) && path.empty()) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "the file table function needs the path of a file");
+    } else if (OB_SUCC(ret) && OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
+    } else if (OB_SUCC(ret) && OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, path))) {
+      LOG_USER_ERROR(OB_ERR_NO_PRIVILEGE,
+                     "access denied to the file, the file has to be inside secure_file_priv");
+    } else if (OB_SUCC(ret)) {
+      // The columns of the file are read from the file itself, so the scan of
+      // the file is not part of the resolver yet.
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "the scan of a local file is not supported yet");
+    }
+  }
+  return ret;
+}
+
+int ObDMLResolver::check_file_table_format(const ObString &func_name, const ObString &format)
+{
+  int ret = OB_SUCCESS;
+  // The error is the one of the parser, so the client gets the same code as a
+  // statement that cannot be parsed at all.
+  if (0 == func_name.case_compare("read_csv")) {
+    if (0 != format.case_compare("csv") && 0 != format.case_compare("auto")) {
+      ret = OB_ERR_PARSE_SQL;
+      LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
+                     0, "unknown format of read_csv", 1);
+    }
+  } else if (0 == func_name.case_compare("read_json")) {
+    if (0 != format.case_compare("newline_delimited") && 0 != format.case_compare("json")) {
+      ret = OB_ERR_PARSE_SQL;
+      LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
+                     0, "unknown format of read_json", 1);
+    }
+  } else if (0 == func_name.case_compare("read_parquet")) {
+    if (0 != format.case_compare("parquet")) {
+      ret = OB_ERR_PARSE_SQL;
+      LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
+                     0, "unknown format of read_parquet", 1);
+    }
+  }
+  return ret;
+}
+
+int ObDMLResolver::resolve_str_literal(const ParseNode &parse_tree, ObString &value)
+{
+  int ret = OB_SUCCESS;
+  value = ObString();
+  // The value of a parameter is a constant, so the text of the statement is
+  // used. The text of a string literal keeps the quotes, they are not part of
+  // the value.
+  const char *text = parse_tree.raw_text_;
+  const int64_t text_len = parse_tree.text_len_;
+  if (OB_ISNULL(text) || text_len <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "the argument of the file table function is not a string");
+  } else if (text_len >= 2 && ('\'' == text[0] || '"' == text[0]) && text[text_len - 1] == text[0]) {
+    value.assign_ptr(text + 1, text_len - 2);
+  } else {
+    value.assign_ptr(text, text_len);
+  }
+  return ret;
+}
+
+int ObDMLResolver::resolve_int_const(const ParseNode &parse_tree, int64_t &value)
+{
+  int ret = OB_SUCCESS;
+  value = 0;
+  const ParseNode *node = &parse_tree;
+  bool is_negative = false;
+  // the minus sign is a node of its own
+  if (T_OP_NEG == node->type_ && 1 == node->num_child_ && OB_NOT_NULL(node->children_)) {
+    is_negative = true;
+    node = node->children_[0];
+  }
+  const char *text = node->raw_text_;
+  const int64_t text_len = node->text_len_;
+  if (OB_ISNULL(text) || text_len <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "the argument of the file table function is not a number");
+  } else {
+    char *end = NULL;
+    const int64_t number = strtoll(text, &end, 10);
+    if (OB_ISNULL(end) || end != text + text_len) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "the argument of the file table function is not a number");
+    } else {
+      value = is_negative ? -number : number;
+    }
   }
   return ret;
 }
