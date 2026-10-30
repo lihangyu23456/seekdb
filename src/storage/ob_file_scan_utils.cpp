@@ -53,9 +53,21 @@ int64_t scan_number(const char *data, int64_t length, bool &is_integer, bool &is
     ++pos;
   }
   int64_t digits = 0;
+  // A number that does not fit into a big integer is a double.
+  uint64_t value = 0;
+  bool overflow = false;
   while (pos < length && is_digit(data[pos])) {
+    const uint64_t digit = static_cast<uint64_t>(data[pos] - '0');
+    if (value > (UINT64_MAX - digit) / 10) {
+      overflow = true;
+    } else {
+      value = value * 10 + digit;
+    }
     ++pos;
     ++digits;
+  }
+  if (overflow) {
+    is_integer = false;
   }
   if (pos < length && data[pos] == '.') {
     is_integer = false;
@@ -84,6 +96,20 @@ int64_t scan_number(const char *data, int64_t length, bool &is_integer, bool &is
   return pos;
 }
 
+/// The number of the days of a month, the month of a leap year has one more.
+int days_of_month(int year, int month)
+{
+  static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month < 1 || month > 12) {
+    return 0;
+  }
+  if (2 == month) {
+    const bool is_leap = (0 == year % 4 && 0 != year % 100) || 0 == year % 400;
+    return is_leap ? 29 : 28;
+  }
+  return days[month - 1];
+}
+
 /// Checks a "YYYY-MM-DD" date, the month and the day have to be real.
 bool is_date(const char *data, int64_t length)
 {
@@ -98,9 +124,10 @@ bool is_date(const char *data, int64_t length)
       return false;
     }
   }
+  const int year = (data[0] - '0') * 1000 + (data[1] - '0') * 100 + (data[2] - '0') * 10 + (data[3] - '0');
   const int month = (data[5] - '0') * 10 + (data[6] - '0');
   const int day = (data[8] - '0') * 10 + (data[9] - '0');
-  if (month < 1 || month > 12 || day < 1 || day > 31) {
+  if (month < 1 || month > 12 || day < 1 || day > days_of_month(year, month)) {
     return false;
   }
   return true;
@@ -288,7 +315,67 @@ int ObCsvFileReader::parse_row(const char *begin,
     }
     ++pos; // the comma between the fields
   }
+  unescape_row(cells);
   return ret;
+}
+
+void ObCsvFileReader::unescape_row(common::ObIArray<ObFileCell> &cells)
+{
+  // A quote inside a field is written twice and a line break of the file is
+  // written with the two characters of the line ending, so the text of the
+  // value is written again without them.
+  int64_t total = 0;
+  bool needs_work = false;
+  for (int64_t i = 0; i < cells.count(); ++i) {
+    const ObFileCell &cell = cells.at(i);
+    total += cell.length_;
+    if (!cell.is_null_) {
+      const char *pos = cell.data_;
+      const char *end = pos + cell.length_;
+      for (; pos < end; ++pos) {
+        if ('"' == *pos || ('\r' == *pos && pos + 1 < end && '\n' == pos[1])) {
+          needs_work = true;
+          break;
+        }
+      }
+    }
+  }
+  if (!needs_work) {
+    return;
+  }
+  // The buffer is big enough for the values of the row, so it does not move
+  // while the values are written into it.
+  row_buffer_.clear();
+  row_buffer_.reserve(row_buffer_.capacity() + total);
+  for (int64_t i = 0; i < cells.count(); ++i) {
+    ObFileCell &cell = cells.at(i);
+    if (cell.is_null_) {
+      continue;
+    }
+    bool needs_copy = false;
+    const char *pos = cell.data_;
+    const char *end = pos + cell.length_;
+    for (; pos < end; ++pos) {
+      if ('"' == *pos || ('\r' == *pos && pos + 1 < end && '\n' == pos[1])) {
+        needs_copy = true;
+        break;
+      }
+    }
+    if (!needs_copy) {
+      continue;
+    }
+    const size_t start = row_buffer_.size();
+    for (pos = cell.data_; pos < end; ++pos) {
+      if ('"' == *pos && pos + 1 < end && '"' == pos[1]) {
+        ++pos; // a doubled quote is one quote
+      } else if ('\r' == *pos && pos + 1 < end && '\n' == pos[1]) {
+        ++pos; // the line break of the file is one character
+      }
+      row_buffer_.push_back(*pos);
+    }
+    cell.data_ = row_buffer_.data() + start;
+    cell.length_ = row_buffer_.size() - start;
+  }
 }
 
 int ObCsvFileReader::read_line(common::ObIArray<ObFileCell> &cells, bool &is_eof)

@@ -137,6 +137,8 @@ public:
 private:
   int fill();
   int parse_row(const char *begin, const char *end, common::ObIArray<ObFileCell> &cells);
+  /// Writes the values that need it into the buffer of the row.
+  void unescape_row(common::ObIArray<ObFileCell> &cells);
 
 private:
   FILE *file_;
@@ -148,6 +150,8 @@ private:
   ObFileStamp stamp_;
   common::ObArray<common::ObString> header_names_;
   bool header_read_;
+  // the values of a row that hold a quote or a line break of the file
+  std::string row_buffer_;
 };
 
 /**

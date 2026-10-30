@@ -30,11 +30,11 @@ namespace sql
 class ObExpr;
 class ObFunctionTableSpec : public ObOpSpec
 {
-OB_UNIS_VERSION_V(3);
+OB_UNIS_VERSION_V(4);
 public:
   ObFunctionTableSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type)
     : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false),
-      file_format_(-1), column_names_(alloc)
+      file_format_(-1), column_names_(alloc), alloc_(&alloc)
   {}
   ObExpr *value_expr_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> column_exprs_;
@@ -43,6 +43,9 @@ public:
   int8_t file_format_;
   // the names of the columns, the rows of a json file are matched by them
   common::ObFixedArray<common::ObString, common::ObIAllocator> column_names_;
+  // the memory of the plan, the names of the columns are copied into it when
+  // the plan is put into the plan cache
+  common::ObIAllocator *alloc_;
 };
 
 class ObFunctionTableOp : public ObOperator

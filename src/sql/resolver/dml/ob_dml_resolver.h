@@ -219,6 +219,7 @@ public:
   int get_file_table_format(const common::ObString &func_name, const common::ObString &format);
   int file_column_type_to_data_type(storage::ObFileColumnType type, common::ObDataType &data_type);
   int check_file_table_format(const common::ObString &func_name, const common::ObString &format);
+  int check_file_table_extension(const common::ObString &path, int8_t file_format);
   int resolve_str_literal(const ParseNode &parse_tree, common::ObString &value);
   int resolve_int_const(const ParseNode &parse_tree, int64_t &value);
   int resolve_unnest_item(const ParseNode &table_node, TableItem *&table_item);

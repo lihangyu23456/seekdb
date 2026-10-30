@@ -3974,12 +3974,17 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
   } else if (parse_tree.num_child_ < 3 ||
              OB_ISNULL(func_node = parse_tree.children_[0]) ||
              OB_ISNULL(args_node = parse_tree.children_[1]) ||
-             OB_ISNULL(alias_node = parse_tree.children_[2]) ||
              OB_ISNULL(func_node->str_value_)) {
     ret = OB_INVALID_ARGUMENT;
   } else {
     func_name.assign_ptr(func_node->str_value_, func_node->str_len_);
-    alias_name.assign_ptr(alias_node->str_value_, alias_node->str_len_);
+    // the table is named after the function when the table has no alias
+    alias_node = parse_tree.children_[2];
+    if (OB_NOT_NULL(alias_node)) {
+      alias_name.assign_ptr(alias_node->str_value_, alias_node->str_len_);
+    } else {
+      alias_name = func_name;
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < args_node->num_child_; ++i) {
       const ParseNode *arg = args_node->children_[i];
       common::ObString arg_name;
@@ -4056,6 +4061,7 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
       if (file_format < 0) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "the format of the file is not supported yet");
+      } else if (OB_FAIL(check_file_table_extension(path, file_format))) {
       }
     }
   }
@@ -4068,6 +4074,10 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
       ret = storage::ObFileScanUtils::infer_csv_schema(path, *allocator_, columns, stamp);
     } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::JSONL) == file_format) {
       ret = storage::ObFileScanUtils::infer_jsonl_schema(path, *allocator_, columns, stamp);
+    } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::PARQUET) == file_format) {
+      // the reader of a parquet file is not written yet
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "the parquet format is not supported yet");
     } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::GLOB) == file_format) {
       // the table of a pattern holds the files that match it, so it has one
       // column that holds the path of a file
@@ -4178,7 +4188,7 @@ int ObDMLResolver::get_file_table_format(const common::ObString &func_name,
   int8_t file_format = -1;
   if (0 == func_name.case_compare("read_csv")) {
     file_format = static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::CSV);
-  } else if (0 == func_name.case_compare("read_json")) {
+  } else if (0 == func_name.case_compare("read_json") || 0 == func_name.case_compare("read_ndjson")) {
     file_format = static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::JSONL);
   } else if (0 == func_name.case_compare("read_parquet")) {
     file_format = static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::PARQUET);
@@ -4251,7 +4261,7 @@ int ObDMLResolver::check_file_table_format(const ObString &func_name, const ObSt
       LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
                      0, "unknown format of read_csv", 1);
     }
-  } else if (0 == func_name.case_compare("read_json")) {
+  } else if (0 == func_name.case_compare("read_json") || 0 == func_name.case_compare("read_ndjson")) {
     if (0 != format.case_compare("newline_delimited") && 0 != format.case_compare("json")) {
       ret = OB_ERR_PARSE_SQL;
       LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
@@ -4263,6 +4273,42 @@ int ObDMLResolver::check_file_table_format(const ObString &func_name, const ObSt
       LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
                      0, "unknown format of read_parquet", 1);
     }
+  }
+  return ret;
+}
+
+int ObDMLResolver::check_file_table_extension(const ObString &path, int8_t file_format)
+{
+  int ret = OB_SUCCESS;
+  // The extension of the file tells the format of it, so a file that does not
+  // have the extension of the format is refused.
+  ObString extension;
+  int64_t dot = -1;
+  for (int64_t i = path.length() - 1; i >= 0; --i) {
+    if ('.' == path.ptr()[i]) {
+      dot = i;
+      break;
+    }
+    if ('/' == path.ptr()[i]) {
+      break;
+    }
+  }
+  if (dot >= 0) {
+    extension.assign_ptr(path.ptr() + dot, path.length() - dot);
+  }
+  bool matched = true;
+  if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::CSV) == file_format) {
+    matched = 0 == extension.case_compare(".csv");
+  } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::JSONL) == file_format) {
+    matched = 0 == extension.case_compare(".json")
+              || 0 == extension.case_compare(".jsonl")
+              || 0 == extension.case_compare(".ndjson");
+  } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::PARQUET) == file_format) {
+    matched = 0 == extension.case_compare(".parquet");
+  }
+  if (!matched) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "the file has an unsupported extension");
   }
   return ret;
 }

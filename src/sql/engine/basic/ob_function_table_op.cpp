@@ -30,8 +30,77 @@ using namespace common;
 namespace sql
 {
 
-OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_,
-                    file_format_, column_names_);
+// The names of the columns are written with their text, so the plan of the
+// plan cache holds a copy of them. A plan that only holds the address of the
+// text would read the memory of the statement after it was freed.
+OB_DEF_SERIALIZE(ObFunctionTableSpec)
+{
+  INIT_SUCC(ret);
+  BASE_SER((ObFunctionTableSpec, ObOpSpec));
+  OB_UNIS_ENCODE(value_expr_);
+  OB_UNIS_ENCODE(column_exprs_);
+  OB_UNIS_ENCODE(has_correlated_expr_);
+  OB_UNIS_ENCODE(file_format_);
+  int32_t name_count = column_names_.count();
+  OB_UNIS_ENCODE(name_count);
+  for (int64_t i = 0; OB_SUCC(ret) && i < name_count; ++i) {
+    const common::ObString &name = column_names_.at(i);
+    if (OB_FAIL(common::serialization::encode_vstr(buf, buf_len, pos, name.ptr(), name.length()))) {
+      ret = OB_SIZE_OVERFLOW;
+    }
+  }
+  return ret;
+}
+
+OB_DEF_DESERIALIZE(ObFunctionTableSpec)
+{
+  INIT_SUCC(ret);
+  BASE_DESER((ObFunctionTableSpec, ObOpSpec));
+  OB_UNIS_DECODE(value_expr_);
+  OB_UNIS_DECODE(column_exprs_);
+  OB_UNIS_DECODE(has_correlated_expr_);
+  OB_UNIS_DECODE(file_format_);
+  int32_t name_count = 0;
+  OB_UNIS_DECODE(name_count);
+  if (OB_SUCC(ret) && OB_FAIL(column_names_.init(name_count))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < name_count; ++i) {
+    int64_t length = 0;
+    const char *text = common::serialization::decode_vstr(buf, data_len, pos, &length);
+    if (OB_ISNULL(text) || length < 0) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      char *name_buf = static_cast<char *>(alloc_->alloc(length + 1));
+      if (OB_ISNULL(name_buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        MEMCPY(name_buf, text, length);
+        name_buf[length] = '\0';
+        if (OB_FAIL(column_names_.push_back(common::ObString(length, name_buf)))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+OB_DEF_SERIALIZE_SIZE(ObFunctionTableSpec)
+{
+  int64_t len = 0;
+  BASE_ADD_LEN((ObFunctionTableSpec, ObOpSpec));
+  OB_UNIS_ADD_LEN(value_expr_);
+  OB_UNIS_ADD_LEN(column_exprs_);
+  OB_UNIS_ADD_LEN(has_correlated_expr_);
+  OB_UNIS_ADD_LEN(file_format_);
+  int32_t name_count = column_names_.count();
+  OB_UNIS_ADD_LEN(name_count);
+  for (int64_t i = 0; i < name_count; ++i) {
+    len += common::serialization::encoded_length_vstr(column_names_.at(i).length());
+  }
+  return len;
+}
 
 int ObFunctionTableOp::inner_open()
 {
@@ -73,7 +142,15 @@ int ObFunctionTableOp::inner_rescan()
       // the file is read again from its beginning
       file_eof_ = false;
       file_reader_.close();
-      if (OB_FAIL(open_file())) {
+      if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::GLOB) == MY_SPEC.file_format_) {
+        if (OB_FAIL(open_glob())) {
+        }
+      } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::JSONL) == MY_SPEC.file_format_) {
+        if (OB_FAIL(open_jsonl())) {
+        }
+      } else {
+        if (OB_FAIL(open_file())) {
+        }
       }
     }
     if (MY_SPEC.has_correlated_expr_) {
@@ -217,7 +294,11 @@ int ObFunctionTableOp::open_jsonl()
 {
   int ret = OB_SUCCESS;
   ObDatum *value = nullptr;
-  jsonl_file_ = nullptr;
+  if (OB_NOT_NULL(jsonl_file_)) {
+    // the file is read again, so the old one is closed
+    fclose(jsonl_file_);
+    jsonl_file_ = nullptr;
+  }
   jsonl_fields_.reset();
   if (OB_FAIL(MY_SPEC.value_expr_->eval(eval_ctx_, value))) {
   } else if (value->is_null()) {
