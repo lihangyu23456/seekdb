@@ -181,6 +181,7 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
   skip_locked_ = other.skip_locked_;
   node_ = other.node_; // should deep copy ? seems to be unnecessary
   snapshot_query_type_ = other.snapshot_query_type_;
+  file_format_ = other.file_format_;
   // ddl related
   ddl_schema_version_ = other.ddl_schema_version_;
   ddl_table_id_ = other.ddl_table_id_;
@@ -190,6 +191,7 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
       && OB_FAIL(deep_copy_json_table_def(*other.json_table_def_, expr_copier, allocator))) {
   } else if (OB_FAIL(expr_copier.copy(other.snapshot_query_expr_, snapshot_query_expr_))) {
   } else if (OB_FAIL(expr_copier.copy(other.function_table_expr_, function_table_expr_))) {
+  } else if (OB_FAIL(expr_copier.copy(other.file_table_expr_, file_table_expr_))) {
   } else if (OB_FAIL(part_ids_.assign(other.part_ids_))) {
   } else if (OB_FAIL(part_names_.assign(other.part_names_))) {
   } else if (is_values_table() &&
@@ -1219,9 +1221,12 @@ int ObDMLStmt::get_table_function_exprs(ObIArray<ObRawExpr *> &table_func_exprs)
   for (int64_t i = 0; OB_SUCC(ret) && i < table_items_.count(); ++i) {
     if (OB_ISNULL(table_items_.at(i))) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (!table_items_.at(i)->is_function_table()) {
-      // do nothing
-    } else if (OB_FAIL(table_func_exprs.push_back(table_items_.at(i)->function_table_expr_))) {
+    } else if (table_items_.at(i)->is_function_table()) {
+      if (OB_FAIL(table_func_exprs.push_back(table_items_.at(i)->function_table_expr_))) {
+      }
+    } else if (table_items_.at(i)->is_file_table()) {
+      if (OB_FAIL(table_func_exprs.push_back(table_items_.at(i)->file_table_expr_))) {
+      }
     }
   }
   return ret;
@@ -1557,6 +1562,7 @@ int ObDMLStmt::formalize_stmt_expr_reference(ObRawExprFactory *expr_factory,
         ret = OB_ERR_UNEXPECTED;
       } else if (table_item->is_function_table() ||
                  table_item->is_json_table() ||
+                 table_item->is_file_table() ||
                  table_item->for_update_ ||
                  table_item->is_values_table()) {
         if (OB_FAIL(set_sharable_expr_reference(*column_item.expr_, ExplicitedRefType::REF_BY_NORMAL))) {
@@ -4075,6 +4081,8 @@ int ObDMLStmt::check_has_subquery_in_function_table(bool &has_subquery_in_functi
       ret = OB_ERR_UNEXPECTED;
     } else if (table->is_function_table()) {
       has_subquery_in_function_table = table->function_table_expr_->has_flag(CNT_SUB_QUERY);
+    } else if (table->is_file_table()) {
+      has_subquery_in_function_table = table->file_table_expr_->has_flag(CNT_SUB_QUERY);
     }
   }
   ObSEArray<ObSelectStmt *, 4> child_stmts;

@@ -1132,7 +1132,8 @@ class Path
     FunctionTablePath()
       : Path(NULL),
         table_id_(OB_INVALID_ID),
-        value_expr_(NULL) {}
+        value_expr_(NULL),
+        file_format_(-1) {}
     virtual ~FunctionTablePath() { }
     int assign(const FunctionTablePath &other, common::ObIAllocator *allocator);
     virtual int estimate_cost() override;
@@ -1147,6 +1148,8 @@ class Path
   public:
     uint64_t table_id_;
     ObRawExpr* value_expr_;
+    // the format of a file, -1 when the path is not a file
+    int8_t file_format_;
   private:
       DISALLOW_COPY_AND_ASSIGN(FunctionTablePath);
   };

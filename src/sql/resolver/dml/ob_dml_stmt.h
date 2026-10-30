@@ -150,6 +150,8 @@ struct TableItem
     snapshot_query_expr_ = nullptr;
     snapshot_query_type_ = SnapshotQueryType::NOT_USING;
     function_table_expr_ = nullptr;
+    file_table_expr_ = nullptr;
+    file_format_ = -1;
     ddl_schema_version_ = 0;
     ddl_table_id_ = common::OB_INVALID_ID;
     json_table_def_ = nullptr;
@@ -188,6 +190,7 @@ struct TableItem
     TRANSPOSE_TABLE,
     TEMP_TABLE,
     JSON_TABLE,
+    FILE_TABLE,
     VALUES_TABLE,
     LATERAL_TABLE,
   };
@@ -223,6 +226,7 @@ struct TableItem
   bool is_joined_table() const { return JOINED_TABLE == type_; }
   bool is_function_table() const { return FUNCTION_TABLE == type_; }
   bool is_json_table() const { return JSON_TABLE == type_; }  // json_table_def_->table_type_ == MulModeTableType::OB_ORA_JSON_TABLE_TYPE
+  bool is_file_table() const { return FILE_TABLE == type_; }
   bool is_values_table() const { return VALUES_TABLE == type_; }//used to mark values statement: values row(1,2), row(3,4);
 
   bool is_lateral_table() const { return LATERAL_TABLE == type_; }
@@ -293,6 +297,9 @@ struct TableItem
   ObRawExpr *snapshot_query_expr_;
   SnapshotQueryType snapshot_query_type_;
   ObRawExpr *function_table_expr_;
+  // the path of a file and the format of it, the table of a file table function
+  ObRawExpr *file_table_expr_;
+  int8_t file_format_;
   int64_t ddl_schema_version_;
   int64_t ddl_table_id_;
   // table partition

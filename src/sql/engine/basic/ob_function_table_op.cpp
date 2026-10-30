@@ -19,6 +19,9 @@
 #include "sql/engine/basic/ob_function_table_op.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
+#include "sql/engine/expr/ob_expr_cast.h"
+#include "sql/engine/expr/ob_obj_cast_runtime.h"
+#include "sql/session/ob_basic_session_info.h"
 
 
 namespace oceanbase
@@ -27,7 +30,8 @@ using namespace common;
 namespace sql
 {
 
-OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_);
+OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_,
+                    file_format_);
 
 int ObFunctionTableOp::inner_open()
 {
@@ -36,6 +40,11 @@ int ObFunctionTableOp::inner_open()
   already_calc_ = false;
   if (OB_ISNULL(MY_SPEC.value_expr_)) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (MY_SPEC.file_format_ >= 0) {
+    // the rows of the table are the rows of a file
+    next_row_func_ = &ObFunctionTableOp::inner_get_next_row_file;
+    if (OB_FAIL(open_file())) {
+    }
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
   } else {
@@ -50,6 +59,13 @@ int ObFunctionTableOp::inner_rescan()
   if (OB_FAIL(ObOperator::inner_rescan())) {
   } else {
     node_idx_ = 0;
+    if (MY_SPEC.file_format_ >= 0) {
+      // the file is read again from its beginning
+      file_eof_ = false;
+      file_reader_.close();
+      if (OB_FAIL(open_file())) {
+      }
+    }
     if (MY_SPEC.has_correlated_expr_) {
       row_count_ = 0;
       col_count_ = 0;
@@ -67,6 +83,8 @@ int ObFunctionTableOp::inner_close()
   row_count_ = 0;
   col_count_ = 0;
   value_table_ = NULL;
+  file_reader_.close();
+  file_path_ = ObString();
   return ret;
 }
 
@@ -102,6 +120,124 @@ int ObFunctionTableOp::get_current_result(ObObj &result)
 int ObFunctionTableOp::inner_get_next_row()
 {
   return (this->*next_row_func_)();
+}
+
+int ObFunctionTableOp::open_file()
+{
+  int ret = OB_SUCCESS;
+  ObDatum *value = nullptr;
+  file_path_ = ObString();
+  if (OB_FAIL(MY_SPEC.value_expr_->eval(eval_ctx_, value))) {
+  } else if (value->is_null()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    file_path_ = value->get_string();
+    // the path of a file is used by the functions of the system, so it needs
+    // a zero at its end
+    char *path_buf = nullptr;
+    if (OB_ISNULL(path_buf = static_cast<char *>(get_exec_ctx().get_allocator().alloc(file_path_.length() + 1)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMCPY(path_buf, file_path_.ptr(), file_path_.length());
+      path_buf[file_path_.length()] = '\0';
+      file_path_ = common::ObString(file_path_.length(), path_buf);
+    }
+    if (OB_SUCC(ret) && OB_FAIL(file_reader_.open(file_path_))) {
+      LOG_WARN("failed to open the file of the table", K(ret), K(file_path_));
+    } else if (OB_SUCC(ret)) {
+      // the header of the file holds the names of the columns, it is not a row
+      common::ObArray<common::ObString> header_names;
+      if (OB_FAIL(file_reader_.header(header_names))) {
+        LOG_WARN("failed to read the header of the file", K(ret), K(file_path_));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_file()
+{
+  int ret = OB_SUCCESS;
+  bool is_eof = false;
+  if (file_eof_) {
+    ret = OB_ITER_END;
+  } else if (OB_FAIL(file_reader_.read_line(file_cells_, is_eof))) {
+    if (OB_ITER_END == ret) {
+      file_eof_ = true;
+    }
+  } else {
+    const int64_t col_count = MY_SPEC.column_exprs_.count();
+    for (int64_t i = 0; OB_SUCC(ret) && i < col_count; ++i) {
+      const storage::ObFileCell *cell = (i < file_cells_.count()) ? &file_cells_.at(i) : nullptr;
+      if (OB_FAIL(set_cell_datum(i, (nullptr == cell) ? storage::ObFileCell() : *cell))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::set_cell_datum(int64_t index, const storage::ObFileCell &cell)
+{
+  int ret = OB_SUCCESS;
+  ObExpr *expr = MY_SPEC.column_exprs_.at(index);
+  ObDatum &datum = expr->locate_datum_for_write(eval_ctx_);
+  if (cell.is_null_) {
+    datum.set_null();
+  } else {
+    const ObObjType type = expr->datum_meta_.type_;
+    common::ObString text = cell.string();
+    common::ObArenaAllocator allocator;
+    char *buf = nullptr;
+    // The value of a boolean column may be written as true or false, the cast
+    // of the database only knows the numbers.
+    if (ObTinyIntType == type
+        && (0 == text.case_compare("true") || 0 == text.case_compare("false"))) {
+      if (OB_ISNULL(buf = static_cast<char *>(allocator.alloc(2)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        buf[0] = (0 == text.case_compare("true")) ? '1' : '0';
+        buf[1] = '\0';
+        text.assign_ptr(buf, 1);
+      }
+    }
+    // The date and the time of a file may be written with a T between the date
+    // and the time, the cast of the database does not know that separator.
+    if (OB_SUCC(ret) && ObDateTimeType == type) {
+      char *time_buf = nullptr;
+      if (OB_ISNULL(time_buf = static_cast<char *>(allocator.alloc(text.length() + 1)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        MEMCPY(time_buf, text.ptr(), text.length());
+        time_buf[text.length()] = '\0';
+        for (int64_t i = 0; i < text.length(); ++i) {
+          if ('T' == time_buf[i]) {
+            time_buf[i] = ' ';
+          }
+        }
+        text.assign_ptr(time_buf, text.length());
+      }
+    }
+    if (OB_SUCC(ret)) {
+      ObObj src_obj;
+      ObObj dst_obj;
+      src_obj.set_varchar(text);
+      src_obj.set_collation_type(expr->obj_meta_.get_collation_type());
+      const ObDataTypeCastParams dtc_params = ObBasicSessionInfo::create_dtc_params(GET_MY_SESSION(ctx_));
+      ObCastCtx cast_ctx(&eval_ctx_.exec_ctx_.get_allocator(), &dtc_params, CM_NONE,
+                         expr->obj_meta_.get_collation_type());
+      ObSqlObjCastRuntime cast_runtime(&eval_ctx_.exec_ctx_);
+      cast_ctx.runtime_ = &cast_runtime;
+      if (OB_FAIL(ObObjCaster::to_type(type, expr->obj_meta_.get_collation_type(), cast_ctx,
+                                      src_obj, dst_obj))) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "cannot read the value '%.*s' of the file",
+                 static_cast<int>(text.length()), text.ptr());
+        LOG_USER_ERROR(OB_ERR_UNEXPECTED, msg);
+      } else if (OB_FAIL(datum.from_obj(dst_obj, expr->obj_datum_map_))) {
+      }
+    }
+  }
+  return ret;
 }
 
 int ObFunctionTableOp::inner_get_next_row_udf()

@@ -910,13 +910,18 @@ int ObLogPlan::init_function_table_depend_info(const ObIArray<TableItem*> &table
     TableDependInfo info;
     if (OB_ISNULL(table)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (!table->is_function_table()) {
+    } else if (!table->is_function_table() && !table->is_file_table()) {
       //do nothing
-    } else if (OB_ISNULL(table->function_table_expr_)) {
+    } else if (OB_ISNULL(table->is_file_table() ? table->file_table_expr_
+                                                : table->function_table_expr_)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (table->function_table_expr_->get_relation_ids().is_empty()) {
+    } else if ((table->is_file_table() ? table->file_table_expr_
+                                       : table->function_table_expr_)->get_relation_ids().is_empty()) {
       //do thing
-    } else if (OB_FAIL(info.depend_table_set_.add_members(table->function_table_expr_->get_relation_ids()))) {
+    } else if (OB_FAIL(info.depend_table_set_.add_members((table->is_file_table()
+                                                                ? table->file_table_expr_
+                                                                : table->function_table_expr_)
+                                                                  ->get_relation_ids()))) {
     } else if (OB_FALSE_IT(info.table_idx_ = stmt->get_table_bit_index(table->table_id_))) {
     } else if (OB_FAIL(table_depend_infos_.push_back(info))) {
     }
@@ -2241,6 +2246,7 @@ int ObLogPlan::allocate_function_table_path(FunctionTablePath *func_table_path,
     op->set_table_id(func_table_path->table_id_);
     op->add_values_expr(func_table_path->value_expr_);
     op->set_table_name(table_item->get_table_name());
+    op->set_file_format(func_table_path->file_format_);
     if (OB_FAIL(append(op->get_filter_exprs(), func_table_path->filter_))) {
     } else if (OB_FAIL(op->compute_property(func_table_path))) {
     } else if (OB_FAIL(op->pick_out_startup_filters())) {

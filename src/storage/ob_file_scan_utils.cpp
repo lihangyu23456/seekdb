@@ -240,39 +240,35 @@ int ObCsvFileReader::parse_row(const char *begin,
 {
   int ret = OB_SUCCESS;
   const char *pos = begin;
-  bool quoted = false;
-  const char *field_begin = pos;
-  common::ObArray<const char *> field_ends;
-  common::ObArray<bool> field_quoted;
-  while (pos < end) {
-    if (quoted) {
-      if ('"' == *pos) {
-        if (pos + 1 < end && '"' == pos[1]) {
-          ++pos; // a doubled quote inside a quoted field
+  // Every field is read on its own: a quoted field holds the commas and the
+  // line breaks of the text, a doubled quote is one quote.
+  while (true) {
+    const char *field_begin = pos;
+    bool quoted = false;
+    if (pos < end && '"' == *pos) {
+      quoted = true;
+      ++pos;
+      while (pos < end) {
+        if ('"' == *pos) {
+          if (pos + 1 < end && '"' == pos[1]) {
+            ++pos; // a doubled quote inside a quoted field
+            ++pos;
+          } else {
+            ++pos; // the closing quote
+            break;
+          }
         } else {
-          quoted = false;
+          ++pos;
         }
       }
-    } else if ('"' == *pos && pos == field_begin) {
-      quoted = true;
-    } else if (',' == *pos) {
-      if (OB_FAIL(field_ends.push_back(pos))) {
-      } else if (OB_FAIL(field_quoted.push_back('"' == *field_begin))) {
+    } else {
+      while (pos < end && ',' != *pos) {
+        ++pos;
       }
-      field_begin = pos + 1;
     }
-    ++pos;
-  }
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(field_ends.push_back(end))) {
-    } else if (OB_FAIL(field_quoted.push_back('"' == *field_begin))) {
-    }
-  }
-  for (int64_t i = 0; OB_SUCC(ret) && i < field_ends.count(); ++i) {
-    const char *field_end = field_ends.at(i);
     const char *value_begin = field_begin;
-    const char *value_end = field_end;
-    if (field_quoted.at(i)) {
+    const char *value_end = pos;
+    if (quoted) {
       ++value_begin; // the opening quote
       if (value_end > value_begin && '"' == value_end[-1]) {
         --value_end; // the closing quote
@@ -281,11 +277,14 @@ int ObCsvFileReader::parse_row(const char *begin,
     const int64_t length = value_end - value_begin;
     // An empty field that is not quoted is a NULL, an empty quoted field is an
     // empty string.
-    const bool is_null = (length == 0) && !field_quoted.at(i);
+    const bool is_null = (0 == length) && !quoted;
     if (OB_FAIL(cells.push_back(ObFileCell(value_begin, length, is_null)))) {
       break;
     }
-    field_begin = field_end + 1;
+    if (pos >= end || ',' != *pos) {
+      break; // the last field of the row
+    }
+    ++pos; // the comma between the fields
   }
   return ret;
 }
@@ -561,25 +560,38 @@ int ObFileScanUtils::infer_csv_schema(const common::ObString &path,
         meta.type_ = ObFileColumnType::NULL_TYPE;
         meta.nullable_ = false;
         bool duplicated = false;
+        int64_t same_count = 0;
         for (int64_t j = 0; j < metas.count(); ++j) {
           if (metas.at(j).name_.length() == meta.name_.length()
               && 0 == memcmp(metas.at(j).name_.ptr(), meta.name_.ptr(), meta.name_.length())) {
             duplicated = true;
-            break;
+            ++same_count;
           }
         }
         if (duplicated) {
-          // A header that appears twice gets the number of the column as a
+          // A header that appears twice gets the number of the occurrence as a
           // suffix, so both columns keep a name of their own.
           char name[128];
           const int written = snprintf(name, sizeof(name), "%.*s__%ld",
-                                      static_cast<int>(meta.name_.length()), meta.name_.ptr(), i);
+                                      static_cast<int>(meta.name_.length()), meta.name_.ptr(),
+                                      same_count + 1);
           if (written <= 0 || written >= static_cast<int>(sizeof(name))) {
             ret = OB_SIZE_OVERFLOW;
             break;
           }
           meta.name_ = common::ObString(written, name);
         }
+        // The name of a column points into the buffer of the reader, which is
+        // gone when the reader is closed, so it is copied into the memory of
+        // the caller.
+        char *name_buf = static_cast<char *>(allocator.alloc(meta.name_.length() + 1));
+        if (OB_ISNULL(name_buf)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          break;
+        }
+        MEMCPY(name_buf, meta.name_.ptr(), meta.name_.length());
+        name_buf[meta.name_.length()] = '\0';
+        meta.name_ = common::ObString(meta.name_.length(), name_buf);
         if (OB_FAIL(metas.push_back(meta))) {
           break;
         }

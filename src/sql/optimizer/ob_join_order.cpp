@@ -6741,6 +6741,7 @@ int FunctionTablePath::assign(const FunctionTablePath &other, common::ObIAllocat
   } else {
     table_id_ = other.table_id_;
     value_expr_ = other.value_expr_;
+    file_format_ = other.file_format_;
   }
   return ret;
 }
@@ -8331,6 +8332,9 @@ int ObJoinOrder::init_base_join_order(const TableItem *table_item)
       set_type(FAKE_CTE_TABLE_ACCESS);
     } else if (table_item->is_function_table()) {
       set_type(FUNCTION_TABLE_ACCESS);
+    } else if (table_item->is_file_table()) {
+      // the rows of a file come from a table function as well
+      set_type(FUNCTION_TABLE_ACCESS);
     } else if (table_item->is_json_table()) {
       set_type(JSON_TABLE_ACCESS);
     } else if (table_item->is_values_table()) {
@@ -8507,7 +8511,8 @@ int ObJoinOrder::generate_function_table_paths()
   if (OB_ISNULL(get_plan()) || OB_ISNULL(stmt = get_plan()->get_stmt()) || OB_ISNULL(allocator_)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_ISNULL(table_item = stmt->get_table_item_by_id(table_id_)) ||
-             OB_ISNULL(table_item->function_table_expr_)) {
+             (OB_ISNULL(table_item->function_table_expr_)
+              && OB_ISNULL(table_item->file_table_expr_))) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(func_path = reinterpret_cast<FunctionTablePath*>(
                        allocator_->alloc(sizeof(FunctionTablePath))))) {
@@ -8527,7 +8532,9 @@ int ObJoinOrder::generate_function_table_paths()
                                                                 func_path->subquery_exprs_,
                                                                 func_path->filter_,
                                                                 false /* with_onetime */ ))) {
-    } else if (OB_ISNULL(function_table_expr = table_item->function_table_expr_)) {
+    } else if (OB_ISNULL(function_table_expr = table_item->is_file_table()
+                                                ? table_item->file_table_expr_
+                                                : table_item->function_table_expr_)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(param_funct_table_expr(function_table_expr,
                                               nl_params,
@@ -8535,6 +8542,7 @@ int ObJoinOrder::generate_function_table_paths()
     } else if (OB_FAIL(func_path->nl_params_.assign(nl_params))) {
     } else {
       func_path->value_expr_ = function_table_expr;
+      func_path->file_format_ = table_item->file_format_;
     }
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(func_path->estimate_cost())) {

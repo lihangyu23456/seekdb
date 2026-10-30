@@ -339,6 +339,19 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
         }
       }
     }
+  } else if (table_item.is_file_table()) {
+    // The columns of a file table are the columns of the file.
+    if (OB_ISNULL(dml_stmt_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && !is_exist && i < dml_stmt_->get_column_size(); ++i) {
+        const ColumnItem &col_item = dml_stmt_->get_column_items().at(i);
+        if (col_item.table_id_ == table_item.table_id_
+            && 0 == col_item.column_name_.case_compare(col_name)) {
+          is_exist = true;
+        }
+      }
+    }
   } else {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected table type", K_(table_item.type));

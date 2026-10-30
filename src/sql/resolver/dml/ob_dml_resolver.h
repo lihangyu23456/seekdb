@@ -23,6 +23,7 @@
 #include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/expr/ob_shared_expr_resolver.h"
+#include "storage/ob_file_scan_utils.h"
 namespace oceanbase
 {
 namespace sql
@@ -209,6 +210,14 @@ public:
                               TableItem *&table_item);
   int resolve_file_table_item(const ParseNode &table_node,
                               TableItem *&table_item);
+  int generate_file_table_output_column_item(TableItem *table_item,
+                                             const common::ObDataType &data_type,
+                                             const common::ObString &column_name,
+                                             int64_t column_id,
+                                             int64_t col_idx,
+                                             ColumnItem *&col_item);
+  int get_file_table_format(const common::ObString &func_name, const common::ObString &format);
+  int file_column_type_to_data_type(storage::ObFileColumnType type, common::ObDataType &data_type);
   int check_file_table_format(const common::ObString &func_name, const common::ObString &format);
   int resolve_str_literal(const ParseNode &parse_tree, common::ObString &value);
   int resolve_int_const(const ParseNode &parse_tree, int64_t &value);
