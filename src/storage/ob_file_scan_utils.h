@@ -57,6 +57,20 @@ struct ObFileColumnMeta {
 };
 
 /**
+ * @brief One field of a json object.
+ *
+ * The file table functions read the json lines files of flat objects, so a
+ * field holds the text of its value and the type of it.
+ */
+struct ObFileJsonField {
+  common::ObString name_;
+  common::ObString text_;
+  ObFileColumnType type_;
+  bool is_null_;
+  ObFileJsonField() : name_(), text_(), type_(ObFileColumnType::NULL_TYPE), is_null_(true) {}
+};
+
+/**
  * @brief The identity of a file, used to notice that the file changed.
  */
 struct ObFileStamp {
@@ -176,6 +190,28 @@ public:
                                 common::ObIAllocator &allocator,
                                 common::ObIArray<ObFileColumnMeta> &columns,
                                 ObFileStamp &stamp);
+
+  /**
+   * @brief Reads the next line of a JSON lines file.
+   *
+   * The line is copied into the allocator of the caller, so it stays valid
+   * after the next line is read.
+   */
+  static int read_jsonl_line(FILE *file,
+                              common::ObIAllocator &allocator,
+                              common::ObString &line,
+                              bool &is_eof);
+
+  /**
+   * @brief Reads the fields of one json object.
+   *
+   * Only a flat object is read: a value that is an object or an array is
+   * refused, so the rows of a file have the same shape.
+   */
+  static int parse_json_object(const char *begin,
+                               const char *end,
+                               common::ObIAllocator &allocator,
+                               common::ObIArray<ObFileJsonField> &fields);
 
   /**
    * @brief Infers the type of one value.

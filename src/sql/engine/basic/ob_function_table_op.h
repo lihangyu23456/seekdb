@@ -30,17 +30,19 @@ namespace sql
 class ObExpr;
 class ObFunctionTableSpec : public ObOpSpec
 {
-OB_UNIS_VERSION_V(2);
+OB_UNIS_VERSION_V(3);
 public:
   ObFunctionTableSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type)
     : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false),
-      file_format_(-1)
+      file_format_(-1), column_names_(alloc)
   {}
   ObExpr *value_expr_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> column_exprs_;
   bool has_correlated_expr_;
   // the format of a file, -1 when the path is not a file
   int8_t file_format_;
+  // the names of the columns, the rows of a json file are matched by them
+  common::ObFixedArray<common::ObString, common::ObIAllocator> column_names_;
 };
 
 class ObFunctionTableOp : public ObOperator
@@ -58,7 +60,10 @@ public:
       file_path_(),
       file_eof_(false),
       file_glob_files_(),
-      file_glob_index_(0)
+      file_glob_index_(0),
+      jsonl_file_(nullptr),
+      jsonl_path_(),
+      jsonl_fields_()
   {}
 
   virtual int inner_open() override;
@@ -72,8 +77,10 @@ private:
   int inner_get_next_row_sys_func();
   int inner_get_next_row_file();
   int inner_get_next_row_glob();
+  int inner_get_next_row_jsonl();
   int open_file();
   int open_glob();
+  int open_jsonl();
   int set_cell_datum(int64_t index, const storage::ObFileCell &cell);
   int get_current_result(common::ObObj &result);
   int64_t node_idx_;
@@ -91,6 +98,10 @@ private:
   // the files of a pattern, the rows of the table are the files
   common::ObArray<common::ObString> file_glob_files_;
   int64_t file_glob_index_;
+  // the rows of a json lines file
+  FILE *jsonl_file_;
+  common::ObString jsonl_path_;
+  common::ObArray<storage::ObFileJsonField> jsonl_fields_;
 };
 
 } // end namespace sql

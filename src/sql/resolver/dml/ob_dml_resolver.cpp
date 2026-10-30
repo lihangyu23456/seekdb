@@ -4066,6 +4066,8 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
   if (OB_SUCC(ret)) {
     if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::CSV) == file_format) {
       ret = storage::ObFileScanUtils::infer_csv_schema(path, *allocator_, columns, stamp);
+    } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::JSONL) == file_format) {
+      ret = storage::ObFileScanUtils::infer_jsonl_schema(path, *allocator_, columns, stamp);
     } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::GLOB) == file_format) {
       // the table of a pattern holds the files that match it, so it has one
       // column that holds the path of a file

@@ -24,6 +24,7 @@
 #include <cctype>
 #include <cstring>
 #include <glob.h>
+#include <string>
 
 #include "lib/string/ob_string_buffer.h"
 #include "share/ob_errno.h"
@@ -675,6 +676,184 @@ int ObFileScanUtils::infer_csv_schema(const common::ObString &path,
   return ret;
 }
 
+int ObFileScanUtils::parse_json_object(const char *begin,
+                                       const char *end,
+                                       common::ObIAllocator &allocator,
+                                       common::ObIArray<ObFileJsonField> &fields)
+{
+  int ret = OB_SUCCESS;
+  fields.reset();
+  const char *pos = begin;
+  // the whitespace of the document is not part of a value
+  auto skip_space = [&pos, end]() {
+    while (pos < end && (' ' == *pos || '\t' == *pos || '\r' == *pos || '\n' == *pos)) {
+      ++pos;
+    }
+  };
+  // the text of a string is copied into the memory of the caller
+  auto copy_text = [&allocator](const char *text, int64_t length, common::ObString &out) -> int {
+    char *buf = static_cast<char *>(allocator.alloc(length + 1));
+    if (OB_ISNULL(buf)) {
+      return OB_ALLOCATE_MEMORY_FAILED;
+    }
+    MEMCPY(buf, text, length);
+    buf[length] = '\0';
+    out.assign_ptr(buf, length);
+    return OB_SUCCESS;
+  };
+  skip_space();
+  if (pos >= end || '{' != *pos) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("the row of the json file is not an object", K(ret));
+  } else {
+    ++pos;
+    while (OB_SUCC(ret)) {
+      skip_space();
+      if (pos >= end) {
+        ret = OB_ERR_UNEXPECTED;
+        break;
+      }
+      if ('}' == *pos) {
+        ++pos;
+        break;
+      }
+      if ('"' != *pos) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("the name of a field of the json file is not a string", K(ret));
+        break;
+      }
+      const char *name_begin = ++pos;
+      while (pos < end && '"' != *pos) {
+        ++pos;
+      }
+      if (pos >= end) {
+        ret = OB_ERR_UNEXPECTED;
+        break;
+      }
+      ObFileJsonField field;
+      if (OB_FAIL(copy_text(name_begin, pos - name_begin, field.name_))) {
+        break;
+      }
+      ++pos; // the closing quote of the name
+      skip_space();
+      if (pos >= end || ':' != *pos) {
+        ret = OB_ERR_UNEXPECTED;
+        break;
+      }
+      ++pos; // the colon
+      skip_space();
+      if (pos >= end) {
+        ret = OB_ERR_UNEXPECTED;
+        break;
+      }
+      if ('"' == *pos) {
+        // a string
+        const char *value_begin = ++pos;
+        while (pos < end && '"' != *pos) {
+          ++pos;
+        }
+        if (pos >= end) {
+          ret = OB_ERR_UNEXPECTED;
+          break;
+        }
+        if (OB_FAIL(copy_text(value_begin, pos - value_begin, field.text_))) {
+          break;
+        }
+        ++pos; // the closing quote
+        // a string that holds a date or a time is a date or a time, the same
+        // way the reader of a csv file reads it
+        field.type_ = infer_type(field.text_.ptr(), field.text_.length(), false);
+        field.is_null_ = false;
+      } else if ('t' == *pos && pos + 4 <= end && 0 == memcmp(pos, "true", 4)) {
+        pos += 4;
+        if (OB_FAIL(copy_text("true", 4, field.text_))) {
+          break;
+        }
+        field.type_ = ObFileColumnType::BOOLEAN;
+        field.is_null_ = false;
+      } else if ('f' == *pos && pos + 5 <= end && 0 == memcmp(pos, "false", 5)) {
+        pos += 5;
+        if (OB_FAIL(copy_text("false", 5, field.text_))) {
+          break;
+        }
+        field.type_ = ObFileColumnType::BOOLEAN;
+        field.is_null_ = false;
+      } else if ('n' == *pos && pos + 4 <= end && 0 == memcmp(pos, "null", 4)) {
+        pos += 4;
+        field.type_ = ObFileColumnType::NULL_TYPE;
+        field.is_null_ = true;
+      } else if ('{' == *pos || '[' == *pos) {
+        // only a flat object is read
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("the value of a field of the json file is not a simple value", K(ret));
+        break;
+      } else {
+        // a number
+        const char *value_begin = pos;
+        while (pos < end && ',' != *pos && '}' != *pos && ' ' != *pos && '\t' != *pos) {
+          ++pos;
+        }
+        if (OB_FAIL(copy_text(value_begin, pos - value_begin, field.text_))) {
+          break;
+        }
+        field.type_ = infer_type(field.text_.ptr(), field.text_.length(), false);
+        field.is_null_ = false;
+      }
+      if (OB_FAIL(fields.push_back(field))) {
+        break;
+      }
+      skip_space();
+      if (pos < end && ',' == *pos) {
+        ++pos;
+        continue;
+      }
+      if (pos < end && '}' == *pos) {
+        ++pos;
+        break;
+      }
+      ret = OB_ERR_UNEXPECTED;
+      break;
+    }
+  }
+  return ret;
+}
+
+int ObFileScanUtils::read_jsonl_line(FILE *file,
+                                     common::ObIAllocator &allocator,
+                                     common::ObString &line,
+                                     bool &is_eof)
+{
+  int ret = OB_SUCCESS;
+  is_eof = false;
+  line = common::ObString();
+  std::string text;
+  char chunk[4096];
+  while (nullptr != fgets(chunk, sizeof(chunk), file)) {
+    text.append(chunk);
+    if (!text.empty() && '\n' == text[text.size() - 1]) {
+      break;
+    }
+  }
+  if (text.empty()) {
+    is_eof = true;
+  } else {
+    // the line break of the file is not part of the row
+    int64_t length = text.size();
+    while (length > 0 && ('\n' == text[length - 1] || '\r' == text[length - 1])) {
+      --length;
+    }
+    char *buf = static_cast<char *>(allocator.alloc(length + 1));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMCPY(buf, text.c_str(), length);
+      buf[length] = '\0';
+      line.assign_ptr(buf, length);
+    }
+  }
+  return ret;
+}
+
 int ObFileScanUtils::infer_jsonl_schema(const common::ObString &path,
                                        common::ObIAllocator &allocator,
                                        common::ObIArray<ObFileColumnMeta> &columns,
@@ -682,24 +861,81 @@ int ObFileScanUtils::infer_jsonl_schema(const common::ObString &path,
 {
   int ret = OB_SUCCESS;
   columns.reset();
-  // The schema of a json lines file is the union of the fields of its rows.
-  // The rows are parsed by the json reader of the database, so the values keep
-  // the type they have in the document.
-  common::ObArray<common::ObString> names;
-  common::ObArray<ObFileColumnType> types;
-  common::ObArray<bool> nullable;
   FILE *file = fopen(path.ptr(), "rb");
   if (OB_ISNULL(file)) {
     ret = OB_IO_ERROR;
     LOG_WARN("cannot open the jsonl file", K(ret), K(path));
   } else {
-    ObFileStamp file_stamp;
-    if (OB_FAIL(stat_file(path, file_stamp))) {
-      ret = OB_ERR_UNEXPECTED;
-    } else {
-      stamp = file_stamp;
+    // The rows are read into a memory of their own, so the memory of the
+    // caller only holds the names of the columns.
+    common::ObArenaAllocator row_allocator;
+    common::ObArray<common::ObString> names;
+    common::ObArray<ObFileColumnType> types;
+    common::ObArray<bool> nullable;
+    common::ObArray<ObFileJsonField> fields;
+    common::ObString line;
+    bool is_eof = false;
+    int64_t read_rows = 0;
+    while (OB_SUCC(ret) && read_rows < MAX_INFER_ROWS) {
+      if (OB_FAIL(read_jsonl_line(file, row_allocator, line, is_eof))) {
+        break;
+      }
+      if (is_eof) {
+        break;
+      }
+      ++read_rows;
+      fields.reset();
+      if (OB_FAIL(parse_json_object(line.ptr(), line.ptr() + line.length(), row_allocator, fields))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("cannot read the row of the jsonl file", K(ret));
+        break;
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < fields.count(); ++i) {
+        const ObFileJsonField &field = fields.at(i);
+        int64_t index = -1;
+        for (int64_t j = 0; index < 0 && j < names.count(); ++j) {
+          if (names.at(j).length() == field.name_.length()
+              && 0 == memcmp(names.at(j).ptr(), field.name_.ptr(), field.name_.length())) {
+            index = j;
+          }
+        }
+        if (index < 0) {
+          index = names.count();
+          // the name of a column lives as long as the statement
+          char *name_buf = static_cast<char *>(allocator.alloc(field.name_.length() + 1));
+          if (OB_ISNULL(name_buf)) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+            break;
+          }
+          MEMCPY(name_buf, field.name_.ptr(), field.name_.length());
+          name_buf[field.name_.length()] = '\0';
+          if (OB_FAIL(names.push_back(common::ObString(field.name_.length(), name_buf)))
+              || OB_FAIL(types.push_back(field.type_))
+              || OB_FAIL(nullable.push_back(field.is_null_))) {
+            break;
+          }
+        } else if (field.is_null_) {
+          nullable.at(index) = true;
+        } else {
+          types.at(index) = widen_type(types.at(index), field.type_);
+        }
+      }
     }
     fclose(file);
+    if (OB_SUCC(ret)) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < names.count(); ++i) {
+        ObFileColumnMeta meta;
+        meta.name_ = names.at(i);
+        meta.type_ = types.at(i);
+        meta.nullable_ = nullable.at(i);
+        if (OB_FAIL(columns.push_back(meta))) {
+          break;
+        }
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(stat_file(path, stamp))) {
+      stamp = ObFileStamp();
+    }
   }
   return ret;
 }

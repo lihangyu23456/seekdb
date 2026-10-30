@@ -31,7 +31,7 @@ namespace sql
 {
 
 OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_,
-                    file_format_);
+                    file_format_, column_names_);
 
 int ObFunctionTableOp::inner_open()
 {
@@ -45,6 +45,10 @@ int ObFunctionTableOp::inner_open()
     if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::GLOB) == MY_SPEC.file_format_) {
       next_row_func_ = &ObFunctionTableOp::inner_get_next_row_glob;
       if (OB_FAIL(open_glob())) {
+      }
+    } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::JSONL) == MY_SPEC.file_format_) {
+      next_row_func_ = &ObFunctionTableOp::inner_get_next_row_jsonl;
+      if (OB_FAIL(open_jsonl())) {
       }
     } else {
       next_row_func_ = &ObFunctionTableOp::inner_get_next_row_file;
@@ -91,6 +95,14 @@ int ObFunctionTableOp::inner_close()
   value_table_ = NULL;
   file_reader_.close();
   file_path_ = ObString();
+  if (OB_NOT_NULL(jsonl_file_)) {
+    fclose(jsonl_file_);
+    jsonl_file_ = nullptr;
+  }
+  jsonl_path_ = ObString();
+  jsonl_fields_.reset();
+  file_glob_files_.reset();
+  file_glob_index_ = 0;
   return ret;
 }
 
@@ -196,6 +208,85 @@ int ObFunctionTableOp::open_glob()
     common::ObArenaAllocator allocator;
     if (OB_FAIL(storage::ObFileScanUtils::list_files(pattern, allocator, file_glob_files_))) {
       LOG_WARN("cannot list the files of the pattern", K(ret), K(pattern));
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::open_jsonl()
+{
+  int ret = OB_SUCCESS;
+  ObDatum *value = nullptr;
+  jsonl_file_ = nullptr;
+  jsonl_fields_.reset();
+  if (OB_FAIL(MY_SPEC.value_expr_->eval(eval_ctx_, value))) {
+  } else if (value->is_null()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    // the path of a file is used by the functions of the system, so it needs
+    // a zero at its end
+    const common::ObString path = value->get_string();
+    char *path_buf = nullptr;
+    if (OB_ISNULL(path_buf = static_cast<char *>(get_exec_ctx().get_allocator().alloc(path.length() + 1)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMCPY(path_buf, path.ptr(), path.length());
+      path_buf[path.length()] = '\0';
+      jsonl_path_ = common::ObString(path.length(), path_buf);
+      if (OB_ISNULL(jsonl_file_ = fopen(jsonl_path_.ptr(), "rb"))) {
+        ret = OB_IO_ERROR;
+        LOG_WARN("cannot open the json lines file", K(ret), K(jsonl_path_));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_jsonl()
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(jsonl_file_)) {
+    ret = OB_ITER_END;
+  } else {
+    common::ObArenaAllocator allocator;
+    common::ObString line;
+    bool is_eof = false;
+    if (OB_FAIL(storage::ObFileScanUtils::read_jsonl_line(jsonl_file_, allocator, line, is_eof))) {
+      ret = OB_ITER_END;
+    } else if (is_eof) {
+      ret = OB_ITER_END;
+    } else {
+      jsonl_fields_.reset();
+      if (OB_FAIL(storage::ObFileScanUtils::parse_json_object(line.ptr(),
+                                                               line.ptr() + line.length(),
+                                                               allocator,
+                                                               jsonl_fields_))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("cannot read the row of the json lines file", K(ret));
+      } else {
+        const int64_t col_count = MY_SPEC.column_exprs_.count();
+        for (int64_t i = 0; OB_SUCC(ret) && i < col_count; ++i) {
+          // a field that the row does not have is NULL
+          const common::ObString &name = (i < MY_SPEC.column_names_.count())
+                                          ? MY_SPEC.column_names_.at(i)
+                                          : common::ObString();
+          const storage::ObFileJsonField *field = nullptr;
+          for (int64_t j = 0; nullptr == field && j < jsonl_fields_.count(); ++j) {
+            const storage::ObFileJsonField &candidate = jsonl_fields_.at(j);
+            if (candidate.name_.length() == name.length()
+                && 0 == memcmp(candidate.name_.ptr(), name.ptr(), name.length())) {
+              field = &candidate;
+            }
+          }
+          const storage::ObFileCell cell = (nullptr == field || field->is_null_)
+                                              ? storage::ObFileCell()
+                                              : storage::ObFileCell(field->text_.ptr(),
+                                                                    field->text_.length(),
+                                                                    false);
+          if (OB_FAIL(set_cell_datum(i, cell))) {
+          }
+        }
+      }
     }
   }
   return ret;
