@@ -23,6 +23,7 @@
 
 #include <cctype>
 #include <cstring>
+#include <glob.h>
 
 #include "lib/string/ob_string_buffer.h"
 #include "share/ob_errno.h"
@@ -473,8 +474,47 @@ int ObFileScanUtils::stat_file(const common::ObString &path, ObFileStamp &stamp)
   return ret;
 }
 
-common::ObString ObFileScanUtils::dir_name(const common::ObString &path)
+int ObFileScanUtils::list_files(const common::ObString &pattern,
+                                common::ObIAllocator &allocator,
+                                common::ObIArray<common::ObString> &files)
 {
+  int ret = OB_SUCCESS;
+  files.reset();
+  glob_t matches;
+  memset(&matches, 0, sizeof(matches));
+  char *pattern_buf = nullptr;
+  if (pattern.empty()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_ISNULL(pattern_buf = static_cast<char *>(allocator.alloc(pattern.length() + 1)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    MEMCPY(pattern_buf, pattern.ptr(), pattern.length());
+    pattern_buf[pattern.length()] = '\0';
+    const int glob_ret = glob(pattern_buf, 0, nullptr, &matches);
+    if (0 != glob_ret) {
+      // a pattern that matches nothing is not an error
+      globfree(&matches);
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < matches.gl_pathc; ++i) {
+        const int64_t length = strlen(matches.gl_pathv[i]);
+        char *path_buf = static_cast<char *>(allocator.alloc(length + 1));
+        if (OB_ISNULL(path_buf)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          break;
+        }
+        MEMCPY(path_buf, matches.gl_pathv[i], length);
+        path_buf[length] = '\0';
+        if (OB_FAIL(files.push_back(common::ObString(length, path_buf)))) {
+          break;
+        }
+      }
+      globfree(&matches);
+    }
+  }
+  return ret;
+}
+
+common::ObString ObFileScanUtils::dir_name(const common::ObString &path){
   const char *pos = (nullptr == path.ptr()) ? nullptr : strrchr(path.ptr(), '/');
   if (nullptr == pos) {
     return common::ObString();

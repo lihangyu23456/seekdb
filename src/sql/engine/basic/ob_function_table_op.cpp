@@ -42,8 +42,14 @@ int ObFunctionTableOp::inner_open()
     ret = OB_ERR_UNEXPECTED;
   } else if (MY_SPEC.file_format_ >= 0) {
     // the rows of the table are the rows of a file
-    next_row_func_ = &ObFunctionTableOp::inner_get_next_row_file;
-    if (OB_FAIL(open_file())) {
+    if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::GLOB) == MY_SPEC.file_format_) {
+      next_row_func_ = &ObFunctionTableOp::inner_get_next_row_glob;
+      if (OB_FAIL(open_glob())) {
+      }
+    } else {
+      next_row_func_ = &ObFunctionTableOp::inner_get_next_row_file;
+      if (OB_FAIL(open_file())) {
+      }
     }
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
@@ -171,6 +177,43 @@ int ObFunctionTableOp::inner_get_next_row_file()
       const storage::ObFileCell *cell = (i < file_cells_.count()) ? &file_cells_.at(i) : nullptr;
       if (OB_FAIL(set_cell_datum(i, (nullptr == cell) ? storage::ObFileCell() : *cell))) {
       }
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::open_glob()
+{
+  int ret = OB_SUCCESS;
+  ObDatum *value = nullptr;
+  file_glob_files_.reset();
+  file_glob_index_ = 0;
+  if (OB_FAIL(MY_SPEC.value_expr_->eval(eval_ctx_, value))) {
+  } else if (value->is_null()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    const common::ObString pattern = value->get_string();
+    common::ObArenaAllocator allocator;
+    if (OB_FAIL(storage::ObFileScanUtils::list_files(pattern, allocator, file_glob_files_))) {
+      LOG_WARN("cannot list the files of the pattern", K(ret), K(pattern));
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_glob()
+{
+  int ret = OB_SUCCESS;
+  if (file_glob_index_ >= file_glob_files_.count()) {
+    ret = OB_ITER_END;
+  } else {
+    ObExpr *expr = MY_SPEC.column_exprs_.at(0);
+    ObDatum &datum = expr->locate_datum_for_write(eval_ctx_);
+    const common::ObString &path = file_glob_files_.at(file_glob_index_++);
+    ObObj value;
+    value.set_varchar(path);
+    value.set_collation_type(expr->obj_meta_.get_collation_type());
+    if (OB_FAIL(datum.from_obj(value, expr->obj_datum_map_))) {
     }
   }
   return ret;

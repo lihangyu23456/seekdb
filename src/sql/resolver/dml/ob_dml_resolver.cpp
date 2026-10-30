@@ -4066,6 +4066,16 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
   if (OB_SUCC(ret)) {
     if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::CSV) == file_format) {
       ret = storage::ObFileScanUtils::infer_csv_schema(path, *allocator_, columns, stamp);
+    } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::GLOB) == file_format) {
+      // the table of a pattern holds the files that match it, so it has one
+      // column that holds the path of a file
+      storage::ObFileColumnMeta meta;
+      meta.name_ = common::ObString("file");
+      meta.type_ = storage::ObFileColumnType::VARCHAR;
+      meta.nullable_ = false;
+      if (OB_FAIL(columns.push_back(meta))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      }
     }
   }
 
@@ -4170,6 +4180,8 @@ int ObDMLResolver::get_file_table_format(const common::ObString &func_name,
     file_format = static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::JSONL);
   } else if (0 == func_name.case_compare("read_parquet")) {
     file_format = static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::PARQUET);
+  } else if (0 == func_name.case_compare("glob")) {
+    file_format = static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::GLOB);
   }
   return file_format;
 }

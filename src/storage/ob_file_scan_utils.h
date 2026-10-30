@@ -150,6 +150,7 @@ public:
     CSV = 0,
     JSONL,
     PARQUET,
+    GLOB,
   };
 
   /**
@@ -200,6 +201,17 @@ public:
    * a query can not walk out of it with ../ or a symbolic link.
    */
   static int check_path(const common::ObString &path, const common::ObString &secure_file_priv);
+
+  /**
+   * @brief Lists the files that match a pattern.
+   *
+   * The pattern is the path of a directory followed by a wildcard, so the
+   * files of the directory are found. The paths are returned in the order of
+   * the pattern.
+   */
+  static int list_files(const common::ObString &pattern,
+                         common::ObIAllocator &allocator,
+                         common::ObIArray<common::ObString> &files);
 
   /// The directory part of a path.
   static common::ObString dir_name(const common::ObString &path);

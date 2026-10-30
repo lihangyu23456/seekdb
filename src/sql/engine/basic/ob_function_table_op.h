@@ -56,7 +56,9 @@ public:
       file_reader_(),
       file_cells_(),
       file_path_(),
-      file_eof_(false)
+      file_eof_(false),
+      file_glob_files_(),
+      file_glob_index_(0)
   {}
 
   virtual int inner_open() override;
@@ -69,7 +71,9 @@ private:
   int inner_get_next_row_udf();
   int inner_get_next_row_sys_func();
   int inner_get_next_row_file();
+  int inner_get_next_row_glob();
   int open_file();
+  int open_glob();
   int set_cell_datum(int64_t index, const storage::ObFileCell &cell);
   int get_current_result(common::ObObj &result);
   int64_t node_idx_;
@@ -84,6 +88,9 @@ private:
   common::ObArray<storage::ObFileCell> file_cells_;
   common::ObString file_path_;
   bool file_eof_;
+  // the files of a pattern, the rows of the table are the files
+  common::ObArray<common::ObString> file_glob_files_;
+  int64_t file_glob_index_;
 };
 
 } // end namespace sql
