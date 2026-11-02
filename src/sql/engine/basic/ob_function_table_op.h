@@ -21,6 +21,7 @@
 #include "sql/engine/basic/ob_chunk_datum_store.h"
 #include "lib/charset/ob_charset.h"
 #include "storage/ob_file_scan_utils.h"
+#include "storage/ob_parquet_reader.h"
 
 namespace oceanbase
 {
@@ -66,7 +67,9 @@ public:
       file_glob_index_(0),
       jsonl_file_(nullptr),
       jsonl_path_(),
-      jsonl_fields_()
+      jsonl_fields_(),
+      parquet_reader_(),
+      parquet_cells_()
   {}
 
   virtual int inner_open() override;
@@ -81,9 +84,11 @@ private:
   int inner_get_next_row_file();
   int inner_get_next_row_glob();
   int inner_get_next_row_jsonl();
+  int inner_get_next_row_parquet();
   int open_file();
   int open_glob();
   int open_jsonl();
+  int open_parquet();
   int set_cell_datum(int64_t index, const storage::ObFileCell &cell);
   int get_current_result(common::ObObj &result);
   int64_t node_idx_;
@@ -105,6 +110,9 @@ private:
   FILE *jsonl_file_;
   common::ObString jsonl_path_;
   common::ObArray<storage::ObFileJsonField> jsonl_fields_;
+  // the rows of a parquet file
+  storage::ObParquetReader parquet_reader_;
+  common::ObArray<storage::ObFileCell> parquet_cells_;
 };
 
 } // end namespace sql
