@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_file_scan_utils.h"
+#include "ob_parquet_reader.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1020,6 +1021,45 @@ int ObFileScanUtils::infer_jsonl_schema(const common::ObString &path,
         }
       }
     }
+    if (OB_SUCC(ret) && OB_FAIL(stat_file(path, stamp))) {
+      stamp = ObFileStamp();
+    }
+  }
+  return ret;
+}
+
+int ObFileScanUtils::infer_parquet_schema(const common::ObString &path,
+                                           common::ObIAllocator &allocator,
+                                           common::ObIArray<ObFileColumnMeta> &columns,
+                                           ObFileStamp &stamp)
+{
+  int ret = OB_SUCCESS;
+  columns.reset();
+  ObParquetReader reader;
+  if (OB_FAIL(reader.open(path, allocator))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("cannot read the parquet file", K(ret), K(path));
+  } else {
+    const common::ObArray<ObFileColumnMeta> &metas = reader.get_columns();
+    for (int64_t i = 0; OB_SUCC(ret) && i < metas.count(); ++i) {
+      const ObFileColumnMeta &source = metas.at(i);
+      ObFileColumnMeta meta;
+      // the name of a column lives as long as the statement
+      char *name_buf = static_cast<char *>(allocator.alloc(source.name_.length() + 1));
+      if (OB_ISNULL(name_buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        break;
+      }
+      MEMCPY(name_buf, source.name_.ptr(), source.name_.length());
+      name_buf[source.name_.length()] = '\0';
+      meta.name_ = common::ObString(source.name_.length(), name_buf);
+      meta.type_ = source.type_;
+      meta.nullable_ = source.nullable_;
+      if (OB_FAIL(columns.push_back(meta))) {
+        break;
+      }
+    }
+    reader.close();
     if (OB_SUCC(ret) && OB_FAIL(stat_file(path, stamp))) {
       stamp = ObFileStamp();
     }

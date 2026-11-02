@@ -196,6 +196,17 @@ public:
                                 ObFileStamp &stamp);
 
   /**
+   * @brief Infers the columns of a parquet file.
+   *
+   * The schema of the file is in its footer, so the columns are known
+   * without reading the rows of the file.
+   */
+  static int infer_parquet_schema(const common::ObString &path,
+                                  common::ObIAllocator &allocator,
+                                  common::ObIArray<ObFileColumnMeta> &columns,
+                                  ObFileStamp &stamp);
+
+  /**
    * @brief Reads the next line of a JSON lines file.
    *
    * The line is copied into the allocator of the caller, so it stays valid
