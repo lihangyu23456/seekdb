@@ -3943,6 +3943,36 @@ int ObDMLResolver::resolve_json_table_item(const ParseNode &parse_tree, TableIte
   return ret;
 }
 
+// the name of the type of a column of a file, the describe of a file table
+// shows the types of the file and not the types of the database
+static const char *file_column_type_name(storage::ObFileColumnType type)
+{
+  const char *name = "VARCHAR";
+  switch (type) {
+    case storage::ObFileColumnType::BIGINT: {
+      name = "BIGINT";
+    } break;
+    case storage::ObFileColumnType::DOUBLE: {
+      name = "DOUBLE";
+    } break;
+    case storage::ObFileColumnType::BOOLEAN: {
+      name = "BOOLEAN";
+    } break;
+    case storage::ObFileColumnType::DATE: {
+      name = "DATE";
+    } break;
+    case storage::ObFileColumnType::DATETIME: {
+      name = "DATETIME";
+    } break;
+    case storage::ObFileColumnType::VARCHAR:
+    case storage::ObFileColumnType::NULL_TYPE:
+    default: {
+      name = "VARCHAR";
+    } break;
+  }
+  return name;
+}
+
 int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
                                            TableItem *&tbl_item)
 {
@@ -4075,9 +4105,7 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
     } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::JSONL) == file_format) {
       ret = storage::ObFileScanUtils::infer_jsonl_schema(path, *allocator_, columns, stamp);
     } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::PARQUET) == file_format) {
-      // the reader of a parquet file is not written yet
-      ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "the parquet format is not supported yet");
+      ret = storage::ObFileScanUtils::infer_parquet_schema(path, *allocator_, columns, stamp);
     } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::GLOB) == file_format) {
       // the table of a pattern holds the files that match it, so it has one
       // column that holds the path of a file
@@ -4137,6 +4165,14 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
                                                                  column_id++,
                                                                  i,
                                                                  col_item))) {
+      } else {
+        // the describe of the table shows the type that the file uses
+        TableItem::FileColumnMeta file_column;
+        file_column.type_name_ = ObString::make_string(file_column_type_name(columns.at(i).type_));
+        file_column.nullable_ = columns.at(i).nullable_;
+        if (OB_FAIL(item->file_columns_.push_back(file_column))) {
+          LOG_WARN("failed to add the column of the file table", K(ret));
+        }
       }
     }
   }

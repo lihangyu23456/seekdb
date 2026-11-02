@@ -37,6 +37,9 @@ int ObExplainLogPlan::generate_normal_raw_plan()
   int ret = OB_SUCCESS;
   if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(!get_stmt()->is_explain_stmt())) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (static_cast<const ObExplainStmt*>(get_stmt())->is_describe()) {
+    // a describe shows the columns of the statement and not its plan
+    ret = generate_describe_plan();
   } else {
     ObLogPlan *child_plan = NULL;
     const ObDMLStmt *child_stmt = NULL;
@@ -101,6 +104,58 @@ int ObExplainLogPlan::generate_normal_raw_plan()
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(allocate_output_expr_for_values_op(*values_op))) {
     } else {
+      get_optimizer_context().set_plan_type(ObPhyPlanType::OB_PHY_PLAN_LOCAL,
+                                            ObPhyPlanType::OB_PHY_PLAN_LOCAL,
+                                            false);
+    }
+  }
+  return ret;
+}
+
+int ObExplainLogPlan::generate_describe_plan()
+{
+  int ret = OB_SUCCESS;
+  const ObExplainStmt *explain_stmt = static_cast<const ObExplainStmt*>(get_stmt());
+  ObLogicalOperator *top = NULL;
+  ObLogValues *values_op = NULL;
+  if (OB_FAIL(allocate_values_as_top(top))) {
+  } else if (OB_ISNULL(top) || OB_UNLIKELY(LOG_VALUES != top->get_type())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    set_plan_root(top);
+    top->mark_is_plan_root();
+    values_op = static_cast<ObLogValues*>(top);
+    // every column of the statement is a row of the describe
+    const common::ObSArray<ObExplainColumnMeta> &columns = explain_stmt->get_describe_columns();
+    for (int64_t i = 0; OB_SUCC(ret) && i < columns.count(); ++i) {
+      const ObExplainColumnMeta &meta = columns.at(i);
+      ObObj objs[DESCRIBE_COLUMN_COUNT];
+      objs[0].set_varchar(meta.name_);
+      objs[1].set_varchar(meta.type_name_);
+      objs[2].set_varchar(meta.nullable_ ? "YES" : "NO");
+      // a file table has no key and no default value
+      objs[3].set_varchar("NULL");
+      objs[4].set_varchar("NULL");
+      objs[5].set_varchar("NULL");
+      for (int64_t j = 0; j < DESCRIBE_COLUMN_COUNT; ++j) {
+        objs[j].set_collation_type(ObCharset::get_system_collation());
+      }
+      ObNewRow row;
+      row.cells_ = objs;
+      row.count_ = DESCRIBE_COLUMN_COUNT;
+      if (OB_FAIL(values_op->add_row(row))) {
+        LOG_WARN("failed to add the row of the describe", K(ret));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      // set values_op operator id && set max operator id for LogPlan
+      values_op->set_op_id(0);
+      set_max_op_id(1);
+    }
+    if (OB_SUCC(ret)) {
+      ret = allocate_output_exprs_for_values_op(*values_op, DESCRIBE_COLUMN_COUNT);
+    }
+    if (OB_SUCC(ret)) {
       get_optimizer_context().set_plan_type(ObPhyPlanType::OB_PHY_PLAN_LOCAL,
                                             ObPhyPlanType::OB_PHY_PLAN_LOCAL,
                                             false);

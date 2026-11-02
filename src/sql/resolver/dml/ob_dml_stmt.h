@@ -131,6 +131,17 @@ struct ObValuesTableDef {
 
 struct TableItem
 {
+  // the type and the nullability of a column of a file table
+  struct FileColumnMeta
+  {
+    FileColumnMeta()
+      : type_name_(),
+        nullable_(true)
+    {}
+    common::ObString type_name_;
+    bool nullable_;
+  };
+
   TableItem()
   {
     table_id_ = common::OB_INVALID_ID;
@@ -300,6 +311,8 @@ struct TableItem
   // the path of a file and the format of it, the table of a file table function
   ObRawExpr *file_table_expr_;
   int8_t file_format_;
+  // the types and the nullability of the columns of a file table
+  common::ObSArray<FileColumnMeta> file_columns_;
   int64_t ddl_schema_version_;
   int64_t ddl_table_id_;
   // table partition

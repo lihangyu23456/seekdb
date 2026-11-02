@@ -25,6 +25,9 @@ namespace oceanbase
 namespace sql
 {
 
+// the number of the columns of the result of a describe
+constexpr int64_t DESCRIBE_COLUMN_COUNT = 6;
+
 struct ObExplainDisplayOpt
 {
   ObExplainDisplayOpt() 
@@ -36,6 +39,19 @@ struct ObExplainDisplayOpt
   bool with_tree_line_;
   bool with_color_;
   bool with_real_info_;
+};
+
+// the description of a column of the result of a describe
+struct ObExplainColumnMeta
+{
+  ObExplainColumnMeta()
+    : name_(),
+      type_name_(),
+      nullable_(true)
+  {}
+  common::ObString name_;
+  common::ObString type_name_;
+  bool nullable_;
 };
 
 class ObExplainStmt : public ObDMLStmt
@@ -57,6 +73,11 @@ public:
   virtual bool is_affect_found_rows() const { return is_select_explain(); }
   bool is_explain_extended() const { return EXPLAIN_EXTENDED == format_
                                             || EXPLAIN_EXTENDED_NOADDR == format_; }
+  // a describe shows the columns of the statement instead of its plan
+  bool is_describe() const { return is_describe_; }
+  void set_is_describe(bool is_describe) { is_describe_ = is_describe; }
+  common::ObSArray<ObExplainColumnMeta> &get_describe_columns() { return describe_columns_; }
+  const common::ObSArray<ObExplainColumnMeta> &get_describe_columns() const { return describe_columns_; }
 
   DECLARE_VIRTUAL_TO_STRING;
 private:
@@ -66,6 +87,8 @@ private:
   ObDMLStmt *explain_query_stmt_;
   common::ObString into_table_;
   common::ObString statement_id_;
+  bool is_describe_;
+  common::ObSArray<ObExplainColumnMeta> describe_columns_;
   DISALLOW_COPY_AND_ASSIGN(ObExplainStmt);
 };
 

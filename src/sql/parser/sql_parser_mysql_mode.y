@@ -44,7 +44,10 @@
   (void)(no_use); \
   ParseNode *type_node = NULL; \
   ParseNode *display_node = NULL; \
-  if (0 != explain_type) { \
+  if (NULL != (no_use)) { \
+    /* the statement is a describe, the format of the plan is not needed */ \
+    malloc_terminal_node(type_node, result->malloc_pool_, T_EXPLAIN_DESC); \
+  } else if (0 != explain_type) { \
     malloc_terminal_node(type_node, result->malloc_pool_, explain_type); \
   } \
   if (0 != display_type) { \
@@ -12313,8 +12316,19 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+| DESCRIBE
+{
+  /* the describe of a statement is not the plan of the statement */
+  ParseNode *desc_node = NULL;
+  malloc_terminal_node(desc_node, result->malloc_pool_, T_EXPLAIN_DESC);
+  $$ = desc_node;
+}
+| DESC
+{
+  ParseNode *desc_node = NULL;
+  malloc_terminal_node(desc_node, result->malloc_pool_, T_EXPLAIN_DESC);
+  $$ = desc_node;
+}
 ;
 
 explainable_stmt:

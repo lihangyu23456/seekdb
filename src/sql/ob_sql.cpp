@@ -25,6 +25,7 @@
 #include "sql/plan_cache/ob_pcv_set.h"
 #include "sql/ob_sql_init.h"
 #include "sql/resolver/ob_resolver.h"
+#include "sql/resolver/ddl/ob_explain_stmt.h"
 #include "sql/resolver/cmd/ob_variable_set_stmt.h"
 #include "sql/resolver/cmd/ob_call_procedure_stmt.h"
 #include "sql/resolver/cmd/ob_anonymous_block_stmt.h"
@@ -53,6 +54,35 @@ namespace sql
 
 const int64_t ObSql::max_error_length = 80;
 const int64_t ObSql::SQL_MEM_SIZE_LIMIT = 1024 * 1024 * 64;
+
+/**
+ * @brief Whether the statement reads a file with a file table function.
+ *
+ * The columns of a file are inferred from the file, so the plan of a statement
+ * that reads a file cannot be kept in the plan cache. Otherwise the plan would
+ * keep the columns of the file that was there when the plan was made.
+ */
+static bool stmt_reads_file(const ObStmt &stmt)
+{
+  bool has_file = false;
+  if (stmt.is_explain_stmt()) {
+    const ObExplainStmt &explain_stmt = static_cast<const ObExplainStmt &>(stmt);
+    ObDMLStmt *child_stmt = explain_stmt.get_explain_query_stmt();
+    if (nullptr != child_stmt) {
+      has_file = stmt_reads_file(*child_stmt);
+    }
+  } else if (stmt.is_dml_stmt()) {
+    const ObDMLStmt &dml_stmt = static_cast<const ObDMLStmt &>(stmt);
+    const common::ObIArray<TableItem *> &table_items = dml_stmt.get_table_items();
+    for (int64_t i = 0; !has_file && i < table_items.count(); ++i) {
+      const TableItem *table_item = table_items.at(i);
+      if (nullptr != table_item && table_item->is_file_table()) {
+        has_file = true;
+      }
+    }
+  }
+  return has_file;
+}
 
 int ObSql::init(common::ObOptStatManager *opt_stat_mgr,
                 common::ObITabletScan *vt_partition_service,
@@ -270,19 +300,45 @@ int ObSql::fill_result_set(ObResultSet &result_set,
       break;
     }
     case stmt::T_EXPLAIN: {
-      ObString tname = ObString::make_string("explain_table");
-      ObString cname = ObString::make_string("Query Plan");
-      field.tname_ = tname;
-      field.org_tname_ = tname;
-      field.cname_ = cname;
-      field.org_cname_ = cname;
-      field.type_.set_type(ObVarcharType);
-      field.charsetnr_ = CS_TYPE_UTF8MB4_GENERAL_CI;
-      field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
-      field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
-      field.type_.set_varchar(type_name);
-      if (OB_FAIL(result_set.reserve_field_columns(1))) {
-      } else if (OB_FAIL(result_set.add_field_column(field))) {
+      ObExplainStmt &explain_stmt = static_cast<ObExplainStmt&>(basic_stmt);
+      if (explain_stmt.is_describe()) {
+        // the columns of the describe of a statement
+        static const char *describe_names[DESCRIBE_COLUMN_COUNT] = {
+          "column_name", "column_type", "null", "key", "default", "extra"
+        };
+        ObString tname = ObString::make_string("describe_table");
+        if (OB_FAIL(result_set.reserve_field_columns(DESCRIBE_COLUMN_COUNT))) {
+        } else {
+          for (int64_t i = 0; OB_SUCC(ret) && i < DESCRIBE_COLUMN_COUNT; ++i) {
+            ObString cname = ObString::make_string(describe_names[i]);
+            field.tname_ = tname;
+            field.org_tname_ = tname;
+            field.cname_ = cname;
+            field.org_cname_ = cname;
+            field.type_.set_type(ObVarcharType);
+            field.charsetnr_ = CS_TYPE_UTF8MB4_GENERAL_CI;
+            field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+            field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
+            field.type_.set_varchar(type_name);
+            if (OB_FAIL(result_set.add_field_column(field))) {
+            }
+          }
+        }
+      } else {
+        ObString tname = ObString::make_string("explain_table");
+        ObString cname = ObString::make_string("Query Plan");
+        field.tname_ = tname;
+        field.org_tname_ = tname;
+        field.cname_ = cname;
+        field.org_cname_ = cname;
+        field.type_.set_type(ObVarcharType);
+        field.charsetnr_ = CS_TYPE_UTF8MB4_GENERAL_CI;
+        field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+        field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
+        field.type_.set_varchar(type_name);
+        if (OB_FAIL(result_set.reserve_field_columns(1))) {
+        } else if (OB_FAIL(result_set.add_field_column(field))) {
+        }
       }
       break;
     }
@@ -2286,6 +2342,10 @@ int ObSql::generate_physical_plan(ParseResult &parse_result,
             ) {
     if (OB_FAIL(generate_plan(parse_result, pc_ctx, sql_ctx, result, mode, basic_stmt,
                              stmt_need_privs))) {
+    } else if (nullptr != pc_ctx && stmt_reads_file(*basic_stmt)) {
+      // the columns of a file are inferred from the file, so the plan of a
+      // statement that reads a file is not kept in the plan cache
+      pc_ctx->should_add_plan_ = false;
     }
   } else if (stmt::T_EXECUTE == basic_stmt->get_stmt_type() &&
              stmt::T_CALL_PROCEDURE != static_cast<ObExecuteStmt*>(basic_stmt)->get_prepare_type()) {
