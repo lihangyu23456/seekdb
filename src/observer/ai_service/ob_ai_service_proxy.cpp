@@ -221,6 +221,24 @@ int ObAiServiceProxy::build_ai_endpoint_(ObArenaAllocator &allocator, ObMySQLRes
   }
 
   if (OB_SUCC(ret)) {
+    // A provider without authentication stores an empty access key. Keep every
+    // empty column an empty string instead of a null pointer, so it is written
+    // back as an empty value instead of a null column.
+    ObString *fields[] = {&endpoint.scope_,
+                          &endpoint.name_,
+                          &endpoint.ai_model_name_,
+                          &endpoint.url_,
+                          &endpoint.access_key_,
+                          &endpoint.provider_,
+                          &endpoint.request_model_name_,
+                          &endpoint.parameters_,
+                          &endpoint.request_transform_fn_,
+                          &endpoint.response_transform_fn_};
+    for (ObString *field : fields) {
+      if (OB_ISNULL(field->ptr())) {
+        field->assign_ptr("", 0);
+      }
+    }
     if (OB_FAIL(endpoint.check_valid())) {
     }
   }
