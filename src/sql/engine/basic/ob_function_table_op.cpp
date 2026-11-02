@@ -119,6 +119,10 @@ int ObFunctionTableOp::inner_open()
       next_row_func_ = &ObFunctionTableOp::inner_get_next_row_jsonl;
       if (OB_FAIL(open_jsonl())) {
       }
+    } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::PARQUET) == MY_SPEC.file_format_) {
+      next_row_func_ = &ObFunctionTableOp::inner_get_next_row_parquet;
+      if (OB_FAIL(open_parquet())) {
+      }
     } else {
       next_row_func_ = &ObFunctionTableOp::inner_get_next_row_file;
       if (OB_FAIL(open_file())) {
@@ -147,6 +151,9 @@ int ObFunctionTableOp::inner_rescan()
         }
       } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::JSONL) == MY_SPEC.file_format_) {
         if (OB_FAIL(open_jsonl())) {
+        }
+      } else if (static_cast<int8_t>(storage::ObFileScanUtils::ObFileFormat::PARQUET) == MY_SPEC.file_format_) {
+        if (OB_FAIL(open_parquet())) {
         }
       } else {
         if (OB_FAIL(open_file())) {
@@ -178,6 +185,8 @@ int ObFunctionTableOp::inner_close()
   }
   jsonl_path_ = ObString();
   jsonl_fields_.reset();
+  parquet_reader_.close();
+  parquet_cells_.reset();
   file_glob_files_.reset();
   file_glob_index_ = 0;
   return ret;
@@ -254,6 +263,8 @@ int ObFunctionTableOp::inner_get_next_row_file()
 {
   int ret = OB_SUCCESS;
   bool is_eof = false;
+  // the value of the column of the previous row must not be used again
+  clear_evaluated_flag();
   if (file_eof_) {
     ret = OB_ITER_END;
   } else if (OB_FAIL(file_reader_.read_line(file_cells_, is_eof))) {
@@ -326,6 +337,8 @@ int ObFunctionTableOp::open_jsonl()
 int ObFunctionTableOp::inner_get_next_row_jsonl()
 {
   int ret = OB_SUCCESS;
+  // the value of the column of the previous row must not be used again
+  clear_evaluated_flag();
   if (OB_ISNULL(jsonl_file_)) {
     ret = OB_ITER_END;
   } else {
@@ -373,9 +386,59 @@ int ObFunctionTableOp::inner_get_next_row_jsonl()
   return ret;
 }
 
+int ObFunctionTableOp::inner_get_next_row_parquet()
+{
+  int ret = OB_SUCCESS;
+  // the value of the column of the previous row must not be used again
+  clear_evaluated_flag();
+  if (!parquet_reader_.is_open()) {
+    ret = OB_ITER_END;
+  } else if (OB_FAIL(parquet_reader_.next_row(parquet_cells_))) {
+    if (OB_ITER_END == ret) {
+      ret = OB_ITER_END;
+    }
+  } else {
+    const int64_t col_count = MY_SPEC.column_exprs_.count();
+    for (int64_t i = 0; OB_SUCC(ret) && i < col_count; ++i) {
+      const storage::ObFileCell *cell = (i < parquet_cells_.count()) ? &parquet_cells_.at(i) : nullptr;
+      if (OB_FAIL(set_cell_datum(i, (nullptr == cell) ? storage::ObFileCell() : *cell))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::open_parquet()
+{
+  int ret = OB_SUCCESS;
+  ObDatum *value = nullptr;
+  parquet_reader_.close();
+  if (OB_FAIL(MY_SPEC.value_expr_->eval(eval_ctx_, value))) {
+  } else if (value->is_null()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    // the path of a file is used by the functions of the system, so it needs
+    // a zero at its end
+    const common::ObString path = value->get_string();
+    char *path_buf = nullptr;
+    if (OB_ISNULL(path_buf = static_cast<char *>(get_exec_ctx().get_allocator().alloc(path.length() + 1)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMCPY(path_buf, path.ptr(), path.length());
+      path_buf[path.length()] = '\0';
+      if (OB_FAIL(parquet_reader_.open(common::ObString(path.length(), path_buf),
+                                       get_exec_ctx().get_allocator()))) {
+      }
+    }
+  }
+  return ret;
+}
+
 int ObFunctionTableOp::inner_get_next_row_glob()
 {
   int ret = OB_SUCCESS;
+  // the value of the column of the previous row must not be used again
+  clear_evaluated_flag();
   if (file_glob_index_ >= file_glob_files_.count()) {
     ret = OB_ITER_END;
   } else {
@@ -387,6 +450,9 @@ int ObFunctionTableOp::inner_get_next_row_glob()
     value.set_collation_type(expr->obj_meta_.get_collation_type());
     if (OB_FAIL(datum.from_obj(value, expr->obj_datum_map_))) {
     }
+    // the value of the column is ready, the operator that reads the row must
+    // not evaluate the expression of the column again
+    expr->get_eval_info(eval_ctx_).evaluated_ = true;
   }
   return ret;
 }
@@ -452,6 +518,9 @@ int ObFunctionTableOp::set_cell_datum(int64_t index, const storage::ObFileCell &
       }
     }
   }
+  // the value of the column is ready, the operator that reads the row must not
+  // evaluate the expression of the column again
+  expr->get_eval_info(eval_ctx_).evaluated_ = true;
   return ret;
 }
 
