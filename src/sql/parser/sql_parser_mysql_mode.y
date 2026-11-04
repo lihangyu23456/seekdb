@@ -316,6 +316,7 @@ END_P SET_VAR DELIMITER
         MASTER_SSL_CRL MASTER_SSL_CRLPATH MASTER_SSL_KEY MASTER_USER MAX MAX_CONNECTIONS_PER_HOUR
         MAX_FILE_SIZE MAX_TOKEN_SIZE MAX_NGRAM_SIZE LOG_DISK_SIZE MAX_QUERIES_PER_HOUR MAX_ROWS MAX_SIZE
         MAX_UPDATES_PER_HOUR MAX_USER_CONNECTIONS MEDIUM MEMORY MEMTABLE MESSAGE_TEXT META MICROSECOND
+        MAX_RETRIES
         MIN MIN_MAX MIN_NGRAM_SIZE MIN_TOKEN_SIZE MINOR MIN_ROWS MINUS MINUTE MISMATCH MODE
         MODIFY MODULE MONTH MOVE MODEL MULTILINESTRING MULTIPOINT MULTIPOLYGON MULTIVALUE MUTEX
         MYSQL_ERRNO MAXIMIZE MEMBER MINVALUE MY_NAME
@@ -338,6 +339,7 @@ END_P SET_VAR DELIMITER
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
         REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        RETRY
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -352,7 +354,7 @@ END_P SET_VAR DELIMITER
         STD STDDEV STDDEV_POP STDDEV_SAMP STOPWORD_TABLE STRONG STRATEGY SYNCHRONIZATION SYNCHRONOUS STOP
         STORAGE STORE STORING STRING
         SUBCLASS_ORIGIN SUBDATE SUBJECT SUBPARTITION SUBPARTITIONS SUBSTR SUBSTRING SUCCESSFUL SUM
-        SUPER SUSPEND SWAPS SWITCH SWITCHES SWITCHOVER SYSTEM SYSTEM_USER SYSDATE SESSION_ALIAS
+        SUPER SUSPEND SWAPS SWITCH SWITCHES SWITCHOVER SYSTEM SYSTEM_USER SYSDATE SESSION_ALIAS SYNC_MODE
         SIZE SKEWONLY SEQUENCE STATEMENT_ID SKIP_HEADER PARSE_HEADER IGNORE_LAST_EMPTY_COLUMN SKIP_BLANK_LINES STATEMENT SUM_OPNSIZE SPARSEVECTOR
 
         TABLE_MODE TABLE_NAME TABLES TABLET TABLET_ID TABLET_MAX_SIZE TASK_ID
@@ -6244,6 +6246,44 @@ not NULLX
 | INVISIBLE
 {
   malloc_terminal_node($$, result->malloc_pool_, T_INVISIBLE);
+}
+| AI COLUMN '(' expr ')' opt_ai_column_with
+{
+  dup_expr_string($4, result, @4.first_column, @4.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN, 2, $4, $6);
+}
+;
+
+opt_ai_column_with:
+/*EMPTY*/
+{ $$ = NULL; }
+| WITH '(' ai_column_option_list ')'
+{
+  $$ = $3;
+}
+;
+
+ai_column_option_list:
+ai_column_option
+{
+  $$ = $1;
+}
+| ai_column_option_list ',' ai_column_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+ai_column_option:
+SYNC_MODE opt_equal_mark STRING_VALUE
+{
+  (void)($2);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_SYNC_MODE, 1, $3);
+}
+| MAX_RETRIES opt_equal_mark INTNUM
+{
+  (void)($2);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_MAX_RETRIES, 1, $3);
 }
 ;
 
@@ -14750,6 +14790,10 @@ DROP CONSTRAINT constraint_name
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_DROP_CONSTRAINT, 1, $3); // drop foreign key or check constraint, to be compatible with mysql
 }
+| RETRY AI COLUMN column_name opt_ai_retry_where
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_TABLE_RETRY_AI_COLUMN, 2, $4, $5);
+}
 | ALGORITHM opt_equal_mark algorithm_opt
 {
   (void)($2);
@@ -14761,6 +14805,18 @@ DROP CONSTRAINT constraint_name
   (void)($2);
   (void)($3);
   $$ = NULL;
+}
+;
+
+opt_ai_retry_where:
+/*EMPTY*/
+{ $$ = NULL; }
+| WHERE expr
+{
+  dup_expr_string($2, result, @2.first_column, @2.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_WHERE_CLAUSE, 1, $2);
+  $$->str_value_ = $2->str_value_;
+  $$->str_len_ = $2->str_len_;
 }
 ;
 
@@ -17886,6 +17942,7 @@ ACCOUNT
 |       LOG_DISK_SIZE
 |       MAX_NGRAM_SIZE
 |       MAX_QUERIES_PER_HOUR
+|       MAX_RETRIES
 |       MAX_ROWS
 |       MAX_SIZE
 |       MAX_TOKEN_SIZE
@@ -18046,6 +18103,7 @@ ACCOUNT
 |       RETURNING
 |       RETURNS
 |       REVERSE
+|       RETRY
 |       REWRITE
 |       ROLE
 |       ROLLBACK
@@ -18150,6 +18208,7 @@ ACCOUNT
 |       SWAPS
 |       SWITCH
 |       SWITCHES
+|       SYNC_MODE
 |       SWITCHOVER
 |       SYNCHRONOUS
 |       SYSTEM

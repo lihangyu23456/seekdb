@@ -547,6 +547,16 @@ protected:
                                          ObColumnResolveStat &reslove_stat);
   int resolve_srid_node(share::schema::ObColumnSchemaV2 &column,
                         const ParseNode &srid_node);
+  int resolve_ai_column_attribute(share::schema::ObColumnSchemaV2 &column,
+                                  ParseNode *attr_node);
+  static int collect_ai_column_dep_columns(const ParseNode *node,
+                                           common::ObIArray<common::ObString> &dep_names);
+  // build the 3 hidden companion columns (state/request/result_spec) for one AI column;
+  // column ids are left unset, the caller assigns them
+  int build_ai_hidden_columns(const share::schema::ObColumnSchemaV2 &ai_column,
+                              common::ObIArray<share::schema::ObColumnSchemaV2> &hidden_cols);
+  // verify no AI column depends on another AI column; table_schema must contain all columns
+  int check_ai_column_deps(const share::schema::ObTableSchema &table_schema);
   int resolve_column_skip_index(
       const ParseNode &skip_index_node,
       share::schema::ObColumnSchemaV2 &column_schema);

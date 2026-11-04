@@ -25,6 +25,7 @@
 #include "sql/session/ob_local_session_var.h"
 #include "query/command/ob_root_command_service.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "share/ai_service/ob_ai_column_util.h"
 
 namespace oceanbase
 {
@@ -3457,6 +3458,42 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         if (OB_SUCC(ret)) {
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
+          }
+        }
+
+        // AI generated column: add 3 hidden companion columns and validate dependencies
+        if (OB_SUCC(ret) && share::ObAIColumnSpec::column_is_ai_result(alter_column_schema)) {
+          share::ObAIColumnSpec ai_spec;
+          ObSEArray<ObColumnSchemaV2, 3> ai_hidden_cols;
+          if (OB_FAIL(share::ObAIColumnSpec::get_column_ai_spec(alter_column_schema, ai_spec))) {
+          } else if (OB_FAIL(build_ai_hidden_columns(alter_column_schema, ai_hidden_cols))) {
+          }
+          for (int64_t hc = 0; OB_SUCC(ret) && hc < ai_hidden_cols.count(); ++hc) {
+            AlterColumnSchema hidden_col;
+            if (OB_FAIL(hidden_col.ObColumnSchemaV2::assign(ai_hidden_cols.at(hc)))) {
+            } else {
+              hidden_col.alter_type_ = OB_DDL_ADD_COLUMN;
+              if (OB_FAIL(alter_table_stmt->add_column(hidden_col))) {
+              }
+            }
+          }
+          // an AI column must not depend on another AI column (check against origin table)
+          const ObString &deps = ai_spec.deps_;
+          const char *cur = deps.ptr();
+          const char *end = deps.ptr() + deps.length();
+          while (OB_SUCC(ret) && cur < end) {
+            const char *comma = static_cast<const char *>(memchr(cur, ',', end - cur));
+            const char *seg_end = (NULL == comma) ? end : comma;
+            ObString dep(static_cast<ObString::obstr_size_t>(seg_end - cur), cur);
+            dep = dep.trim();
+            if (!dep.empty() && OB_NOT_NULL(table_schema_)) {
+              const ObColumnSchemaV2 *dep_col = table_schema_->get_column_schema(dep);
+              if (OB_NOT_NULL(dep_col) && share::ObAIColumnSpec::column_is_ai_result(*dep_col)) {
+                ret = OB_NOT_SUPPORTED; // default user msg: "Not supported feature or function"
+                SQL_RESV_LOG(WARN, "ai column depends on another ai column", K(ret), K(dep));
+              }
+            }
+            cur = (NULL == comma) ? end : comma + 1;
           }
         }
       }

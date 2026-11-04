@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_create_table_resolver.h"
+#include "share/ai_service/ob_ai_column_util.h"
 #include "sql/resolver/dml/ob_select_resolver.h"
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
 #include "sql/rewrite/ob_transform_utils.h"
@@ -842,6 +843,20 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             if (OB_FAIL(stats.push_back(stat))) {
             }
           }
+
+          // AI generated column: append its 3 hidden companion columns;
+          // they are added to table_schema below (entries beyond resolved_cols_count)
+          if (OB_SUCC(ret) && share::ObAIColumnSpec::column_is_ai_result(column)) {
+            ObSEArray<ObColumnSchemaV2, 3> ai_hidden_cols;
+            if (OB_FAIL(build_ai_hidden_columns(column, ai_hidden_cols))) {
+            }
+            for (int64_t hc = 0; OB_SUCC(ret) && hc < ai_hidden_cols.count(); ++hc) {
+              ObColumnSchemaV2 &hcol = ai_hidden_cols.at(hc);
+              hcol.set_column_id(gen_column_id());
+              if (OB_FAIL(resolved_cols.push_back(hcol))) {
+              }
+            }
+          }
         }
       } else if (T_PRIMARY_KEY == element->type_) {
         if (primary_key_set_in_heap_table) {
@@ -893,6 +908,12 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
           if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
           }
         }
+      }
+    }
+
+    // AI columns: verify no AI column depends on another AI column
+    if (OB_SUCC(ret) && RESOLVE_NON_COL != resolve_rule) {
+      if (OB_FAIL(check_ai_column_deps(table_schema))) {
       }
     }
 
